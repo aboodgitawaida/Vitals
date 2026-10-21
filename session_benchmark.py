@@ -213,10 +213,11 @@ def calibrate(windows=600, seed=3):
     print(f"Pure-noise windows: {windows}")
     print(f"  SNR percentiles   50%: {np.percentile(snrs, 50):+.1f} dB   90%: {np.percentile(snrs, 90):+.1f} dB"
           f"   99%: {np.percentile(snrs, 99):+.1f} dB")
-    print(f"  false 'enter' rate (SNR >= {trk.SNR_ENTER:+.0f} dB):                     {enter / windows:.1%}")
-    print(f"  false 'keep' rate  (SNR >= {trk.SNR_KEEP:+.0f} dB and within {trk.GATE_BPM:.0f} BPM of track): {keep / windows:.1%}")
-    print("Note: these are per-window rates. The tracker also needs two agreeing windows to")
-    print("start, and a jump to persist 2 s, so false READINGS on screen are rarer still.")
+    print(f"  false 'enter' rate (SNR >= {trk.SNR_ENTER:+.1f} dB):                       {enter / windows:.1%}")
+    print(f"  false 'keep' rate  (SNR >= {trk.SNR_KEEP:+.1f} dB and within {trk.GATE_BPM:.0f} BPM of track): {keep / windows:.1%}")
+    print("Note: these are per-window rates. The tracker also needs a reading to persist")
+    print(f"{trk.ACQUIRE_SEC:.1f} s to start and a jump to persist {trk.CONFIRM_SEC:.0f} s, and a weak window only")
+    print(f"counts within {trk.REFRESH_SEC:.0f} s of a strong one, so false READINGS on screen are rarer.")
 
 
 if __name__ == "__main__":
