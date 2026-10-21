@@ -85,3 +85,46 @@ def test_patch_map_off_gives_same_answer():
     a = analyze_heart_rate(t, patches, bg)
     b = analyze_heart_rate(t, patches, bg, patch_map=False)
     assert a["bpm"] == b["bpm"] and a["snr_db"] == b["snr_db"]
+
+
+# ---------------- motion correction ----------------
+
+def _fidget_patch(rng, coupling):
+    """A patch whose brightness follows 4 head-pose signals, plus a pulse."""
+    t = np.arange(0, 15, 1 / FS)
+    pose = np.column_stack([bandpass(rng.normal(size=t.size), 0.5, 2.0) for _ in range(4)])
+    pose /= pose.std(axis=0)
+    shading = 1 + pose @ (coupling * np.array([1.0, -0.6, 0.4, 0.8]))
+    pulse = 0.001 * np.sin(2 * np.pi * 1.2 * t)
+    rgb = np.array([170.0, 120.0, 95.0]) * (shading + pulse)[:, None]
+    pose_band = bandpass(pose, HR_LOW, HR_HIGH)
+    return t, rgb, pose_band
+
+
+def test_motion_regression_removes_pose_artefact():
+    from vitals_dsp import remove_nuisance
+    t, rgb, pose_band = _fidget_patch(np.random.default_rng(3), 0.004)
+    g = lambda x: bandpass(x[:, 1] / x[:, 1].mean() - 1, HR_LOW, HR_HIGH)
+    cleaned = remove_nuisance(rgb, pose_band)
+    f, p = power_spectrum(g(rgb))
+    assert abs(pick_peak(f, p, HR_LOW, HR_HIGH) - 1.2) > 0.05         # motion wins before
+    f, p = power_spectrum(g(cleaned))
+    assert abs(pick_peak(f, p, HR_LOW, HR_HIGH) - 1.2) < 0.05         # pulse wins after
+
+
+def test_motion_gate_off_when_still_on_when_moving():
+    from vitals_dsp import MOTION_R2_MIN, motion_explained
+    rng = np.random.default_rng(4)
+    _, still, pose_band = _fidget_patch(rng, 0.0)
+    _, moving, pose_band2 = _fidget_patch(rng, 0.004)
+    assert motion_explained(still, pose_band) < MOTION_R2_MIN
+    assert motion_explained(moving, pose_band2) > MOTION_R2_MIN
+
+
+def test_pose_with_missing_frames_is_handled():
+    rng = np.random.default_rng(7)
+    t, patches, bg, truth = make_trial("steady light", "lighter", rng)
+    pose = rng.normal(size=(t.size, 4))
+    pose[50:60] = np.nan
+    r = analyze_heart_rate(t, patches, bg, pose=pose)
+    assert abs(r["bpm"] - truth) < 3 and r["motion_patches"] == 0
