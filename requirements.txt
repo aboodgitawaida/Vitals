@@ -1,0 +1,5 @@
+# Pinned: mediapipe 0.10.21 is the last line with the FaceMesh "solutions" API used here.
+# Needs Python 3.9-3.12. MediaPipe installs a compatible OpenCV itself.
+mediapipe==0.10.21
+numpy<2
+scipy
