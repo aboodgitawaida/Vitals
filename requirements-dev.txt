@@ -1,0 +1,9 @@
+# For automated tests and CI only (no camera, no MediaPipe needed).
+# On your Mac, do NOT install this file into the "vitals" env: MediaPipe already
+# ships its own OpenCV, and a second OpenCV package would conflict.
+# Locally just run:  pip install pytest
+numpy<2
+scipy
+opencv-python-headless
+matplotlib
+pytest
