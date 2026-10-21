@@ -6,10 +6,20 @@ note your real heart rate from a watch / pulse oximeter, then:
 
     python replay.py recordings/session_YYYYMMDD_HHMMSS.csv --ref 72
 
-It slides a window across the recording (one estimate per second), runs every
-pipeline configuration on EXACTLY the same data, and prints:
-  coverage = % of windows where the method was confident enough to show a number
-  MAE      = mean absolute error vs --ref, on the windows it showed
+Two tables, both on EXACTLY the same data:
+
+1. Signal processing: slides a 15 s window across the recording (one estimate
+   per second) and runs every pipeline configuration.
+     coverage = % of windows confident enough to show a number (SNR >= 0 dB)
+     MAE      = mean absolute error vs --ref, on the windows it showed
+
+2. What the screen would have shown: streams the recording frame by frame
+   through the old v3 display logic and the v4 tracker (vitals_stream.py),
+   the same code the app runs.
+     coverage  = % of the time a number was on screen
+     drops/min = how often the number vanished
+     held      = share of shown time that was a held value
+
 It also saves a plot next to the recording.
 
 This is the honest way to claim "feature X helps": same input, one change,
@@ -21,11 +31,13 @@ proper time-aligned ground truth.)
 import argparse
 import csv
 import os
+import warnings
 
 import numpy as np
 
 from face_regions import patch_region
 from vitals_dsp import analyze_heart_rate
+from vitals_stream import HeartRateTracker, LegacyDisplay, simulate_display
 
 CONFIGS = {   # name: (method, use patches?, background?, harmonics?)
     "green, 3 regions": ("green", False, False, False),
@@ -57,7 +69,17 @@ def load_session(path):
 
     patches = {n: series(n) for n in names if n != "background"}
     background = series("background") if "background" in names else None
-    return times, patches, background
+
+    # v4 recordings also store whether a face was found and whether the head
+    # moved fast, per frame. Older recordings: assume face present, no motion.
+    def flag(name, default):
+        if name not in col:
+            return np.full(len(data), default)
+        return np.array([r[col[name]] == "1" for r in data])
+
+    face = flag("face", True)
+    moving = flag("moving", False)
+    return times, patches, background, face, moving
 
 
 def merge_regions(patches):
@@ -69,7 +91,8 @@ def merge_regions(patches):
     for region, arrays in groups.items():
         stack = np.stack(arrays)
         valid = ~np.isnan(stack).any(axis=2)
-        with np.errstate(invalid="ignore"):
+        with warnings.catch_warnings():               # frames with no patch at all -> NaN, expected
+            warnings.simplefilter("ignore", RuntimeWarning)
             merged = np.nanmean(stack, axis=0)
         merged[valid.sum(axis=0) == 0] = np.nan
         out[region] = merged
@@ -104,10 +127,13 @@ def main():
     parser.add_argument("--step", type=float, default=1.0, help="seconds between estimates (default 1)")
     args = parser.parse_args()
 
-    times, patches, background = load_session(args.session)
-    print(f"{args.session}: {times[-1] - times[0]:.0f} s, {len(times)} frames "
-          f"({len(times) / (times[-1] - times[0]):.0f} fps), {len(patches)} patches, "
-          f"background {'yes' if background is not None else 'no'}\n")
+    times, patches, background, face, moving = load_session(args.session)
+    duration = times[-1] - times[0]
+    print(f"{args.session}: {duration:.0f} s, {len(times)} frames "
+          f"({len(times) / duration:.0f} fps), {len(patches)} patches, "
+          f"background {'yes' if background is not None else 'no'}, "
+          f"no-face frames {(~face).mean():.1%}, fast-motion frames {moving.mean():.1%}\n")
+    print("1. SIGNAL PROCESSING (each 15 s window on its own)")
 
     all_results = {}
     print(f"{'configuration':<22}{'coverage':>10}{'median BPM':>12}" + (f"{'MAE':>8}{'<=5 BPM':>9}" if args.ref else ""))
@@ -123,6 +149,33 @@ def main():
             line += (f"{err.mean():>8.1f}{(err <= 5).mean():>9.0%}" if len(shown) else f"{'--':>8}{'--':>9}")
         print(line)
 
+    print("\n2. WHAT THE SCREEN WOULD HAVE SHOWN (frame-by-frame, auto method)")
+    screen = {
+        "v3 display (old)": simulate_display(times, patches, background, face, moving,
+                                             LegacyDisplay(), max_gap_sec=0.0, drop_motion=False),
+        "v4 tracker": simulate_display(times, patches, background, face, moving, HeartRateTracker()),
+    }
+    print(f"{'display logic':<20}{'coverage':>10}{'drops/min':>11}{'held':>7}"
+          + (f"{'MAE':>8}{'<=5 BPM':>9}{'MAE locked':>12}" if args.ref else ""))
+    print("-" * (48 + (29 if args.ref else 0)))
+    for name, res in screen.items():
+        res = [r for r in res if r[0] - times[0] >= 8.0]          # skip the first 8 s of collecting
+        shown = [(b, s) for _, b, s in res if b is not None]
+        flags = [b is not None for _, b, _ in res]
+        drops = sum(1 for a, b in zip(flags, flags[1:]) if a and not b)
+        held = np.mean([s == "holding" for _, s in shown]) if shown else 0.0
+        line = (f"{name:<20}{len(shown) / max(len(res), 1):>10.0%}"
+                f"{drops / max(duration / 60, 1e-9):>11.1f}{held:>7.0%}")
+        if args.ref:
+            if shown:
+                err = np.abs(np.array([b for b, _ in shown]) - args.ref)
+                locked = [abs(b - args.ref) for b, s in shown if s == "locked"]
+                line += (f"{err.mean():>8.1f}{(err <= 5).mean():>9.0%}"
+                         f"{(np.mean(locked) if locked else float('nan')):>12.1f}")
+            else:
+                line += f"{'--':>8}{'--':>9}{'--':>12}"
+        print(line)
+
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -131,7 +184,13 @@ def main():
         for config in ("green, 3 regions", "POS, 3 regions (v2)", "auto (v3)"):
             pts = [(t, b) for t, b, _, s in all_results[config] if s]
             if pts:
-                ax.plot(*zip(*pts), ".", label=config, markersize=5)
+                ax.plot(*zip(*pts), ".", label=f"window: {config}", markersize=4, alpha=0.6)
+        # What v4 would have put on screen: solid where locked, faded where held.
+        for state, alpha in (("locked", 1.0), ("holding", 0.35)):
+            pts = [(t, b) for t, b, s in screen["v4 tracker"] if b is not None and s == state]
+            if pts:
+                ax.plot(*zip(*pts), "s", color="tab:red", markersize=3, alpha=alpha,
+                        label=f"on screen (v4): {state}")
         if args.ref:
             ax.axhline(args.ref, color="k", linestyle="--", linewidth=1, label=f"reference {args.ref:.0f}")
         # Always show at least a 40 BPM range so tiny differences don't look dramatic
