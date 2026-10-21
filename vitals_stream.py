@@ -57,16 +57,18 @@ class SampleBuffer:
         self.times = deque()
         self.traces = {n: deque() for n in self.patch_names}
         self.background = deque()
+        self.pose = deque()
         self.last_face_time = None
 
-    def add(self, t, colors, background_rgb):
-        """One frame with a face. colors: {patch: RGB or None}."""
+    def add(self, t, colors, background_rgb, pose=None):
+        """One frame with a face. colors: {patch: RGB or None}; pose: 4 head-pose numbers or None."""
         missing = np.full(3, np.nan)
         self.times.append(t)
         for n in self.patch_names:
             c = colors.get(n)
             self.traces[n].append(missing if c is None else np.asarray(c, dtype=float))
         self.background.append(missing if background_rgb is None else np.asarray(background_rgb, dtype=float))
+        self.pose.append(np.full(4, np.nan) if pose is None else np.asarray(pose, dtype=float))
         self.last_face_time = t
         self._trim(t)
 
@@ -95,6 +97,7 @@ class SampleBuffer:
         while self.times and now - self.times[0] > self.window_sec:
             self.times.popleft()
             self.background.popleft()
+            self.pose.popleft()
             for n in self.patch_names:
                 self.traces[n].popleft()
 
@@ -106,6 +109,11 @@ class SampleBuffer:
         return (np.array(self.times),
                 {n: np.array(self.traces[n]) for n in self.patch_names},
                 np.array(self.background))
+
+    def pose_array(self):
+        """(N, 4) head pose, or None if no frame in the window had one."""
+        p = np.array(self.pose)
+        return None if len(p) == 0 or np.isnan(p).all() else p
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +168,13 @@ class HeartRateTracker:
        a little genuinely new data; session_benchmark.py showed the 0.5 s
        version letting a noise peak through on dim, darker-skin sessions.
 
+    6. Start early, but with a stricter bar.
+       The app starts analysing after 5 s instead of waiting for a full 15 s
+       window. A short window has coarser frequency resolution, and pure noise
+       reaches a given SNR more easily (measured: at 5 s, noise passes 0 dB
+       ~4% of the time vs ~0% at 15 s). So for windows shorter than
+       FULL_BAR_SEC both thresholds are raised by up to SHORT_WINDOW_EXTRA_DB.
+
     The displayed value is the median of the last few accepted estimates.
 
     Settings were chosen with session_benchmark.py (coverage, "confidently
@@ -177,6 +192,9 @@ class HeartRateTracker:
     HOLD_SEC = 3.0       # show a held value at most this long
     PRIOR_SEC = 10.0     # keep favouring the old track this long after the last accept
     SMOOTH_N = 5         # median of this many accepted estimates
+    SHORT_WINDOW_EXTRA_DB = 1.0   # extra SNR needed for the shortest (5 s) windows
+    SHORT_WINDOW_SEC = 5.0        # window length that gets the full extra
+    FULL_BAR_SEC = 8.0            # from this window length on, no extra
 
     def __init__(self, **overrides):
         for k, v in overrides.items():
@@ -222,15 +240,24 @@ class HeartRateTracker:
         self.candidate = (c[0], now, c[2] + [bpm])
         return now - c[0] >= need_sec
 
-    def update(self, now, bpm=None, snr_db=None, usable=True):
+    def extra_db(self, window_sec):
+        """How much stricter both SNR thresholds are for a window this short."""
+        if window_sec is None:
+            return 0.0
+        span = self.FULL_BAR_SEC - self.SHORT_WINDOW_SEC
+        frac = np.clip((self.FULL_BAR_SEC - window_sec) / span, 0.0, 1.0)
+        return float(self.SHORT_WINDOW_EXTRA_DB * frac)
+
+    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None):
         """
         One new window. bpm/snr_db from analyze_heart_rate (None if no face
-        data); usable=False when the head moved (estimate not trusted).
+        data); usable=False when the head moved (estimate not trusted);
+        window_sec = how many seconds of data the estimate used.
         """
         self.last_snr = snr_db
         has_track = self.track is not None and now - self.last_accept <= self.HOLD_SEC
-
-        if bpm is not None and snr_db is not None and usable:
+        if snr_db is not None:
+            snr_db = snr_db - self.extra_db(window_sec)   # short window: same rules, higher bar
             if has_track:
                 near = abs(bpm - self.track) <= self.GATE_BPM
                 strong = snr_db >= self.SNR_ENTER
@@ -287,7 +314,7 @@ class LegacyDisplay:
         self.history.clear()
         self.bpm = None
 
-    def update(self, now, bpm=None, snr_db=None, usable=True):
+    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None):
         if bpm is None or snr_db is None or not usable or snr_db < self.snr_min_db:
             self.reset()
             return Reading(None, "lost", snr_db, None)
@@ -301,8 +328,8 @@ class LegacyDisplay:
 # --------------------------------------------------------------------------
 
 def simulate_display(times, patches, background, face, moving, display, max_gap_sec=1.0,
-                     drop_motion=True, window_sec=15.0, min_sec=8.0, update_every=0.5,
-                     motion_hold=1.5, method="auto"):
+                     drop_motion=True, window_sec=15.0, min_sec=5.0, update_every=0.5,
+                     motion_hold=1.5, method="auto", pose=None):
     """
     Replays per-frame data in the same order as vitals_app.py and returns
     [(time, bpm shown or None, state), ...] once per update.
@@ -311,6 +338,7 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
     sessions), so both measure the logic the app actually runs.
       face:   (N,) bool, False = FaceMesh found no face in that frame
       moving: (N,) bool, True = fast head motion in that frame
+      pose:   (N, 4) head pose per frame, or None (no motion correction)
     """
     names = list(patches)
     buf = SampleBuffer(names, window_sec, max_gap_sec)
@@ -324,7 +352,8 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
             buf.add_unusable(now)
         else:
             buf.add(now, {n: patches[n][i] for n in names},
-                    None if background is None else background[i])
+                    None if background is None else background[i],
+                    None if pose is None else pose[i])
         if moving[i]:
             last_motion = now
         if now - last_update < update_every:
@@ -335,9 +364,9 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
         else:
             t, traces, bg = buf.arrays()
             r = analyze_heart_rate(t, traces, None if background is None else bg, method=method,
-                                   prev_bpm=prior, patch_map=False)
+                                   prev_bpm=prior, patch_map=False, pose=buf.pose_array())
             reading = display.update(now, r and r["bpm"], r and r["snr_db"],
-                                     usable=now - last_motion >= motion_hold)
+                                     usable=now - last_motion >= motion_hold, window_sec=buf.span())
         prior = reading.prior_bpm
         out.append((float(now), reading.bpm, reading.state))
     return out

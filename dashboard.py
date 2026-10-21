@@ -83,8 +83,9 @@ def draw_region_bars(img, x, y, w, region_stats, features):
     Per region: best patch SNR (bar) and the share of the final signal that
     came from this region (inverse-noise weights).
     """
-    panel(img, x, y, w, 112, "SKIN REGIONS   best SNR | weight")
-    put(img, features, (x + w - 118, y + 22), 0.38, C["muted"])
+    panel(img, x, y, w, 112, "REGIONS  SNR | weight")
+    (fw, _), _ = cv2.getTextSize(features, FONT, 0.38, 1)
+    put(img, features, (x + w - fw - 10, y + 22), 0.38, C["muted"])
     for i, (name, (snr, share)) in enumerate(region_stats.items()):
         row_y = y + 46 + i * 24
         put(img, name, (x + 12, row_y + 4), 0.42)

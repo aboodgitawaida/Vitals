@@ -11,14 +11,17 @@ no video is saved or uploaded.
 ## How it works
 
 ```
-webcam -> FaceMesh -> 16 skin patches (hair / shadow / glare removed, thresholds
-          relative to the person's own skin, not a fixed skin-colour range)
+webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
+       -> 16 skin patches averaged at full resolution (hair / shadow / glare removed,
+          thresholds relative to the person's own skin, not a fixed skin-colour range)
        -> rolling 15 s buffer (bridges face-detection gaps < 1 s, blanks fast-motion frames)
-       -> cancel room-light changes seen on the background wall
+       -> nuisance regression per patch: remove what the background wall (room light)
+          and, where the head moved enough to matter, head pose (fidgeting) explain
        -> inverse-noise-variance pooling of patches
        -> POS or green channel (auto: whichever has the cleaner spectrum)
        -> 0.7-4 Hz band -> FFT peak with harmonic check -> SNR
        -> tracker: acquiring / locked / holding / lost -> dashboard
+          (first estimate after 5 s, with a stricter bar for short windows)
 ```
 
 | File | What it does |
@@ -42,13 +45,17 @@ pip install -r requirements.txt
 python vitals_app.py
 ```
 
+Options: `--res 640x480` (old resolution, to A/B against the default 1280x720),
+`--no-motion-correction`.
+
 Keys: `q` quit, `m` method (auto / pos / green), `b` background cancellation,
 `l` light mode (white full-screen so the screen lights your face), `r` patch SNR
 map, `s` start/stop recording (average colours per frame only, never images).
 
 ```zsh
 python replay.py recordings/session_YYYYMMDD_HHMMSS.csv --ref 72   # 72 = your watch's BPM
-python session_benchmark.py              # simulated sessions, v3 vs v4 display logic
+python session_benchmark.py              # simulated sessions: v3 vs v4 vs v5, still and fidgeting
+python session_benchmark.py --start      # how fast and how right is the first number?
 python session_benchmark.py --vanish     # does the number disappear when the pulse does?
 python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
 pip install pytest && python -m pytest -q tests
@@ -64,6 +71,12 @@ pip install pytest && python -m pytest -q tests
 * **Lighting and motion.** Dim light raises camera noise; movement corrupts the
   signal. The app tells you which one it sees, and it refuses to show a number
   when the signal is too weak.
+* **Motion correction assumes small movements.** It removes the part of each
+  patch's brightness that follows head pose linearly. Large turns, talking with
+  big jaw movement and walking are out of scope. The head also moves very
+  slightly with every heartbeat (ballistocardiography); if FaceMesh picked that
+  up, the correction could remove a little real pulse. Only real recordings
+  (motion correction on vs off in `replay.py`) can show how much this matters.
 * **Lag.** The number describes roughly the last 15 seconds, so it reacts to
   changes with a delay of several seconds.
 * **Simulated results only so far.** The benchmarks generate data from the

@@ -1,14 +1,16 @@
 """
-vitals_app.py -- Vitals from Video, v4 (Phase 1, light-adaptive + tracker).
+vitals_app.py -- Vitals from Video, v5 (Phase 1: tracker, motion correction, HD sampling).
 
-webcam -> FaceMesh landmarks -> 16 skin patches (hair/shadow/glare removed)
-       + background wall reference
+webcam (1280x720) -> FaceMesh on a 640-wide copy (fast)
+       -> 16 skin patches averaged on the FULL-resolution frame (more pixels = less noise)
+       + background wall reference + head pose (x, y, scale, roll)
        -> rolling 15 s buffer (rides out brief face loss; fast-motion frames blanked)
-       -> per patch: cancel room-light changes seen on the wall, measure noise
+       -> per patch: remove what the wall (room light) and head pose (fidgeting) explain
        -> inverse-noise-weighted pooling -> POS or green (auto-selected)
        -> harmonic-aware FFT peak -> tracker (lock / hold / lost) -> dashboard
 
-Run:   python vitals_app.py
+Run:   python vitals_app.py               (HD sampling, 1280x720)
+       python vitals_app.py --res 640x480 (old resolution, for A/B comparison)
 Keys:  q quit
        m method: AUTO -> POS -> GREEN
        b background cancellation on/off
@@ -20,7 +22,9 @@ Camera-based vitals ESTIMATION for learning/portfolio purposes. Not a medical
 device. All processing happens locally; no video is saved or uploaded.
 """
 
+import argparse
 import csv
+import math
 import os
 import time
 from collections import deque
@@ -37,7 +41,7 @@ from vitals_stream import HeartRateTracker, SampleBuffer
 
 # ---------------- Settings you can tune ----------------
 WINDOW_SEC = 15          # seconds of history per estimate (15 s -> ~4 BPM frequency resolution)
-MIN_SEC = 8              # wait for this much data before the first estimate
+MIN_SEC = 5              # first estimate after 5 s (the tracker asks more of short windows)
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
 FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
@@ -45,19 +49,39 @@ MOTION_LIMIT = 0.025     # nose movement per frame (fraction of face width) that
 SMALL_MOTION = 0.008     # smaller movement: no pause, but auto mode then prefers POS
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
 SMOOTHING = 0.5          # landmark smoothing 0..1 (higher = steadier patches, more lag)
-FRAME_WIDTH = 640        # frames are resized to this width (keeps FaceMesh fast)
+FRAME_WIDTH = 640        # FaceMesh and the dashboard use a copy this wide (keeps them fast)
 WINDOW = "Vitals from Video"
 METHODS = ["auto", "pos", "green"]
 
 
-def open_camera():
+def open_camera(width, height):
+    """
+    Why ask for HD: each patch's colour is an AVERAGE over its pixels, and
+    averaging N pixels shrinks independent sensor noise by sqrt(N). 1280x720
+    has 3x the pixels of 640x480, so in theory up to ~1.7x less noise per
+    patch (~5 dB). The camera's own processing already smooths some noise
+    away, so the real gain is smaller -- compare with --res 640x480 + replay.py.
+    """
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_FPS, 30)
     if not cap.isOpened():
         raise SystemExit("Could not open the webcam. Check camera permissions and that no other app is using it.")
+    got = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    print(f"camera: asked for {width}x{height}, got {got[0]}x{got[1]}")
     return cap
+
+
+def head_pose(lm, w, h):
+    """
+    Four numbers describing where the head is, for motion correction:
+    nose x, nose y, face width (moving closer/further) and roll (tilt), all
+    relative to the frame so they don't depend on the resolution.
+    """
+    left_eye, right_eye = lm[33], lm[263]
+    roll = math.atan2(right_eye[1] - left_eye[1], right_eye[0] - left_eye[0])
+    return np.array([lm[1][0] / w, lm[1][1] / h, np.linalg.norm(lm[234] - lm[454]) / w, roll])
 
 
 def set_window_mode(light):
@@ -86,7 +110,8 @@ def start_recording():
     for name in PATCHES + ["background"]:
         header += [f"{name}_r", f"{name}_g", f"{name}_b"]
     # face/moving/state let replay.py reproduce exactly what the screen did.
-    writer.writerow(header + ["bpm_shown", "snr_db", "method_used", "light_mode", "face", "moving", "state"])
+    writer.writerow(header + ["bpm_shown", "snr_db", "method_used", "light_mode", "face", "moving", "state",
+                              "pose_x", "pose_y", "pose_scale", "pose_roll", "frame_w", "frame_h"])
     print("recording to", path)
     return f, writer
 
@@ -107,7 +132,14 @@ def region_summary(analysis):
 
 
 def main():
-    cap = open_camera()
+    ap = argparse.ArgumentParser(description="Camera-based heart-rate estimation (not a medical device).")
+    ap.add_argument("--res", default="1280x720", help="camera resolution, e.g. 1280x720 (default) or 640x480")
+    ap.add_argument("--no-motion-correction", action="store_true", help="turn off head-pose regression")
+    args = ap.parse_args()
+    cam_w, cam_h = (int(v) for v in args.res.lower().split("x"))
+    use_motion = not args.no_motion_correction
+
+    cap = open_camera(cam_w, cam_h)
     face_mesh = mp.solutions.face_mesh.FaceMesh(
         max_num_faces=1, refine_landmarks=False,
         min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -140,12 +172,15 @@ def main():
             fps = 0.9 * fps + 0.1 / max(now - last_frame_time, 1e-3)
         last_frame_time = now
 
-        frame = cv2.flip(frame, 1)                         # mirror view
-        scale = FRAME_WIDTH / frame.shape[1]
-        frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        h, w = frame.shape[:2]
-        result = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        status, colors, bg_rgb, moving_now = "", None, None, False
+        full = cv2.flip(frame, 1)                          # mirror view, full resolution
+        h, w = full.shape[:2]
+        scale = FRAME_WIDTH / w
+        small = cv2.resize(full, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        # FaceMesh runs on the small copy (fast). Its landmarks are fractions of the image,
+        # so they map straight onto the full-resolution frame, where colours are measured.
+        result = face_mesh.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+        frame = full
+        status, colors, bg_rgb, moving_now, pose = "", None, None, False, None
         method = METHODS[method_idx]
 
         if result.multi_face_landmarks:
@@ -167,6 +202,7 @@ def main():
 
             colors, patches, regions, stats = extract_patch_colors(frame, smooth_lm)
             bg_rgb, bg_boxes = background_color(frame, smooth_lm)
+            pose = head_pose(lm, w, h)                     # raw (unsmoothed) landmarks: real head motion
 
             # Fast-motion frames are stored as gaps (filled by interpolation), so a
             # head turn doesn't poison the next 15 s of windows.
@@ -174,7 +210,7 @@ def main():
             if big_move:
                 buffer.add_unusable(now)
             else:
-                buffer.add(now, colors, bg_rgb)
+                buffer.add(now, colors, bg_rgb, pose)
 
             have = buffer.span()
             moving = now - last_motion < MOTION_HOLD
@@ -189,9 +225,11 @@ def main():
                 times, traces, background = buffer.arrays()
                 analysis = analyze_heart_rate(
                     times, traces, background, method=method, prev_bpm=reading.prior_bpm,
-                    use_background=use_background, green_margin_db=margin)
+                    use_background=use_background, green_margin_db=margin,
+                    pose=buffer.pose_array(), use_motion=use_motion)
                 reading = tracker.update(now, analysis and analysis["bpm"],
-                                         analysis and analysis["snr_db"], usable=not moving)
+                                         analysis and analysis["snr_db"], usable=not moving,
+                                         window_sec=have)
                 trend.append((now, reading.bpm))
 
             if show_map:
@@ -217,6 +255,8 @@ def main():
                 smooth_lm = None
                 status = "No face detected"
 
+        frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)   # display size
+
         while trend and now - trend[0][0] > 60:
             trend.popleft()
 
@@ -234,7 +274,9 @@ def main():
             "level": level, "state": reading.state,
             "method_label": f"AUTO>{used.upper()}" if method == "auto" else method.upper(),
             "method_used": used, "lighting": lighting,
-            "features": f"bg cancel {'ON' if use_background else 'OFF'}",
+            "features": (f"bg {'ON' if use_background else 'OFF'}  "
+                         + (f"motion {analysis['motion_patches']}/{len(PATCHES)}"
+                            if use_motion and analysis else ("motion OFF" if not use_motion else "motion -"))),
             "recording": rec_writer is not None, "trend": trend,
             "region_stats": region_summary(analysis),
             "freqs": analysis["freqs"] if analysis else None,
@@ -253,6 +295,8 @@ def main():
                 row += [f"{v:.4f}" for v in c] if c is not None else ["", "", ""]
             row += [f"{bpm:.1f}" if bpm is not None else "", f"{snr:.2f}" if snr is not None else "",
                     used, int(light_mode), int(colors is not None), int(moving_now), reading.state]
+            row += [f"{v:.6f}" for v in pose] if pose is not None else ["", "", "", ""]
+            row += [w, h]
             rec_writer.writerow(row)
 
         key = cv2.waitKey(1) & 0xFF
