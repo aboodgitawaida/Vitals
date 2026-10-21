@@ -70,7 +70,8 @@ def draw_heart_rate(img, x, y, info):
     (tw, _), _ = cv2.getTextSize(value, FONT, 2.6, 4)
     put(img, "BPM", (x + 30 + tw, y + 105), 0.8, color, 1)
     cv2.circle(img, (x + 26, y + 130), 6, color, -1, cv2.LINE_AA)
-    put(img, LEVEL_TEXT[info["level"]], (x + 40, y + 136), 0.5, color)
+    label = "HOLDING (weak signal)" if info.get("state") == "holding" else LEVEL_TEXT[info["level"]]
+    put(img, label, (x + 40, y + 136), 0.5, color)
     snr = f"SNR {info['snr_db']:+.1f} dB" if info["snr_db"] is not None else "SNR --"
     put(img, f"{snr}   {info['method_label']}   {info['fps']:.0f} fps", (x + 20, y + 160), 0.42, C["muted"])
     level, message = info["lighting"]

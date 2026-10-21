@@ -236,7 +236,8 @@ def noise_level(normalized, fs=FS, cutoff_hz=5.0):
 
 
 def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev_bpm=None,
-                       use_background=True, use_harmonics=True, green_margin_db=0.0, fs=FS):
+                       use_background=True, use_harmonics=True, green_margin_db=0.0,
+                       patch_map=True, fs=FS):
     """
     Full pipeline for one update.
 
@@ -249,6 +250,8 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
                     chosen. The app raises it to 3 dB when the head moved during
                     the window, because motion creates clean-looking false peaks
                     in green that POS cancels.
+    patch_map:      also compute per-patch SNR for the on-screen map. Display
+                    only; benchmarks turn it off (it is ~60% of the run time).
 
     Why many small patches instead of 3 big regions? With light from one
     side, part of a cheek is lit and part is in shadow. Shadowed skin
@@ -294,6 +297,8 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         patch_weight[name] = weight
 
         # Per-patch SNR, for the on-screen SNR map only
+        if not patch_map:
+            continue
         map_method = "green" if method == "auto" else method
         f, p = power_spectrum(pulse_signal(rgb_u, map_method, fs), fs)
         patch_snr[name] = snr_db(f, p, pick_peak(f, p, HR_LOW, HR_HIGH), HR_LOW, HR_HIGH)
