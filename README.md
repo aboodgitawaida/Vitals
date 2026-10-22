@@ -16,10 +16,13 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
           thresholds relative to the person's own skin, not a fixed skin-colour range)
        -> rolling 15 s buffer (bridges face-detection gaps < 1 s, blanks fast-motion frames)
        -> nuisance regression per patch: remove what the background wall (room light)
-          and, where the head moved enough to matter, head pose (fidgeting) explain
+          and, where the head moved enough to matter, head pose and mouth
+          movement (fidgeting, talking) explain
        -> inverse-noise-variance pooling of patches
        -> POS or green channel (auto: whichever has the cleaner spectrum)
        -> 0.7-4 Hz band -> FFT peak with harmonic check -> SNR
+       -> cross-check: POS, CHROM and green each find their own peak; if no
+          second method agrees (within 5 BPM) the estimate is not trusted
        -> tracker: acquiring / locked / holding / lost -> dashboard
           (first estimate after 5 s, with a stricter bar for short windows)
 ```
@@ -28,6 +31,9 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | --- | --- |
 | `vitals_app.py` | Live app: camera, FaceMesh, dashboard, recording |
 | `vitals_dsp.py` | All signal processing (no camera code, fully testable) |
+| `frame_features.py` | Per-frame skin colours, wall, head pose and motion, shared by the app and the video tools |
+| `evaluate_video.py` | Accuracy on videos with a reference (UBFC-rPPG dataset, test videos, your own clips) |
+| `make_test_video.py` | Turns a selfie into a test video with a known heart rate |
 | `vitals_stream.py` | Rolling buffer and display tracker, shared by app, replay and benchmarks |
 | `face_regions.py` | Skin regions, patch grid, skin filter, background boxes, lighting coach |
 | `dashboard.py` | OpenCV UI, dark and light themes |
@@ -64,6 +70,50 @@ python session_benchmark.py --vanish     # does the number disappear when the pu
 python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
 pip install pytest && python -m pytest -q tests
 ```
+
+## Validation
+
+Accuracy is measured the way rPPG research does it: run the pipeline on
+videos recorded with a contact sensor and compare, window by window.
+
+```zsh
+python make_test_video.py selfie.jpg --bpm 72          # known-BPM test video from a photo
+python evaluate_video.py test_videos/selfie_72
+python evaluate_video.py path/to/UBFC-rPPG/DATASET_2   # public research dataset (request access)
+python evaluate_video.py my_clip.mp4 --ref-bpm 68      # your own clip + a watch reading
+```
+
+It reports, per method and for what the app would display: MAE, RMSE,
+Pearson r, share within 5 BPM, and a Bland-Altman plot. The reference heart
+rate is computed from the pulse-oximeter waveform over the same 15 s windows.
+
+**Status:** the full video pipeline (decoding, compression, frame features,
+analysis, tracker) recovers a known heart rate from synthetic test videos
+with under 0.2 BPM error, including head sway and in-band lamp flicker. In
+the flicker video, single methods failed in different ways (POS locked onto
+the flicker without wall cancellation; CHROM with it) while the full
+pipeline stayed correct: that is why the three methods are cross-checked.
+Synthetic videos only test the plumbing. **UBFC-rPPG results: not run yet.**
+
+## What this project deliberately does not measure
+
+* **Blood pressure.** Claims exist, but without credible evidence that it
+  works across the full range; a dataset of mostly normal readings makes
+  any method look accurate.
+* **Blood oxygen (SpO2).** Needs calibrated measurements at specific
+  wavelengths; a consumer webcam's RGB filters are not that.
+* **Heart-rate variability (HRV).** Standard HRV uses 5-minute recordings,
+  and at 30 fps beat timing is only accurate to ~33 ms, the same order as
+  the beat-to-beat differences HRV measures.
+* **Stress, emotion, lying.** Heart rate changes for many reasons;
+  inferring mental states from it is not scientifically established.
+
+## Privacy
+
+Everything runs on your machine. Recordings, liveness attempts and the
+evaluation cache store per-frame average colours only, never images. If
+you record other people, tell them that the video is analysed for heart
+rate, and get their consent.
 
 ## Liveness check (prototype)
 
@@ -118,6 +168,10 @@ OLED phone, a matte photo under a lamp) still need testing in person.
   slightly with every heartbeat (ballistocardiography); if FaceMesh picked that
   up, the correction could remove a little real pulse. Only real recordings
   (motion correction on vs off in `replay.py`) can show how much this matters.
+* **Talking.** Mouth movement is used for motion correction, but in
+  simulation talking did not hurt POS in the first place (jaw shading is
+  mostly a brightness change). Whether the correction helps on real faces
+  is measured with `replay.py` (motion correction on vs off).
 * **Lag.** The number describes roughly the last 15 seconds, so it reacts to
   changes with a delay of several seconds.
 * **Simulated results only so far.** The benchmarks generate data from the
