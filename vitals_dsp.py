@@ -78,13 +78,17 @@ def power_spectrum(x, fs=FS, nfft=8192):
 
 
 # --------------------------------------------------------------------------
-# Removing room-light changes using the background as a reference
+# Removing room-light changes and head-motion effects ("nuisance regression")
 # --------------------------------------------------------------------------
 
-def remove_background(rgb, background_band):
+def remove_nuisance(rgb, nuisance_band):
     """
-    Illumination rectification using a non-skin reference
-    (idea from Li et al., CVPR 2014).
+    Subtract everything in the skin colour that can be explained by a set of
+    reference signals that have NO pulse in them ("nuisance regressors").
+    Two kinds of reference are used:
+
+    1. The background wall (illumination rectification, idea from
+       Li et al., CVPR 2014).
 
     The wall behind you has no pulse, but it IS lit by the same room light.
     So anything the wall's colour does in the heart-rate band (lamp flicker
@@ -99,14 +103,51 @@ def remove_background(rgb, background_band):
     flicker, a screen showing a video) are not cancelled by POS -- but they
     show up on the wall too.
 
-    rgb:             (N, 3) evenly sampled skin colour
-    background_band: (N, 3) wall colour, normalised and band-passed
+    2. Head pose from FaceMesh (x, y, scale, roll). When your head nods or
+       turns a little, each patch tilts toward or away from the light and its
+       brightness wobbles in step with the movement. That wobble lands right in
+       the heart-rate band (fidgeting is ~0.2-2 Hz). The pulse does not follow
+       your head pose, so whatever the pose signals explain is motion artefact.
+       The same goes for TALKING: the mouth-opening signal explains the cheek
+       wobble that jaw movement causes (1-4 Hz, right in the heart-rate band).
+       Why it matters: POS already cancels pure brightness changes, but in dim
+       light the app often prefers green (POS mixes in a noisy blue channel),
+       and green has no defence against motion. This gives green much of POS's
+       motion immunity, which is what makes "dim AND moving" workable.
+
+    Cost of each regressor: it can also remove a small, random part of the
+    pulse (about 1/100 of its power per regressor for a 15 s window), so only
+    a handful of references are used (3 wall + 5 pose).
+
+    rgb:           (N, 3) evenly sampled skin colour
+    nuisance_band: (N, K) reference signals, standardised and band-passed
     """
     mean = rgb.mean(axis=0)
     normalized = rgb / mean - 1.0
-    coef, *_ = np.linalg.lstsq(background_band, bandpass(normalized, HR_LOW, HR_HIGH), rcond=None)
-    cleaned = normalized - background_band @ coef
+    coef, *_ = np.linalg.lstsq(nuisance_band, bandpass(normalized, HR_LOW, HR_HIGH), rcond=None)
+    cleaned = normalized - nuisance_band @ coef
     return mean * (1.0 + cleaned)
+
+
+remove_background = remove_nuisance     # old name, still used by tests and older notes
+
+MOTION_R2_MIN = 0.15   # head pose must explain >= 15% of a patch's in-band wobble to be removed
+
+
+def motion_explained(rgb, pose_band):
+    """
+    Fraction of this patch's in-band green wobble that head pose explains (R^2).
+
+    Why gate at all: every reference signal removes a little pulse by chance
+    (5 pose signals in a 15 s window remove ~5% of any signal's power at
+    random), so when you sit still the correction costs signal and buys
+    nothing. By chance alone R^2 rarely exceeds ~0.13; above MOTION_R2_MIN the
+    head really did move enough to matter for this patch.
+    """
+    g = bandpass(rgb[:, 1] / rgb[:, 1].mean() - 1.0, HR_LOW, HR_HIGH)
+    coef, *_ = np.linalg.lstsq(pose_band, g, rcond=None)
+    resid = g - pose_band @ coef
+    return 1.0 - resid.var() / (g.var() + 1e-18)
 
 
 # --------------------------------------------------------------------------
@@ -159,10 +200,47 @@ def pos_pulse(rgb, fs=FS, win_sec=1.6):
     return h
 
 
+def chrom_pulse(rgb, fs=FS, win_sec=1.6):
+    """
+    CHROM (de Haan & Jeanne, IEEE Trans. Biomedical Engineering, 2013).
+
+    Like POS, it builds two colour-difference signals that cancel pure
+    brightness changes, but with fixed weights derived from a standard skin
+    colour instead of POS's projection:
+        X = 3R - 2G           Y = 1.5R + G - 1.5B
+        pulse = X - alpha * Y,  alpha = std(X) / std(Y)
+    Same short overlapping windows as pos_pulse, so slow lighting drift is
+    normalised away.
+
+    Why have a third method at all: it is used mainly as an independent
+    CROSS-CHECK. POS, CHROM and green react differently to motion and to
+    changing light, so when all three find the same heart rate, the peak is
+    much more likely to be the pulse (see analyze_heart_rate: "agreement").
+    """
+    n = len(rgb)
+    win = int(round(win_sec * fs))
+    windows = sliding_window_view(rgb, win, axis=0)                       # (n - win + 1, 3, win)
+    normalized = windows / (windows.mean(axis=2, keepdims=True) + 1e-9)
+    r, g, b = normalized[:, 0], normalized[:, 1], normalized[:, 2]
+    x = 3 * r - 2 * g
+    y = 1.5 * r + g - 1.5 * b
+    x -= x.mean(axis=1, keepdims=True)
+    y -= y.mean(axis=1, keepdims=True)
+    alpha = x.std(axis=1) / (y.std(axis=1) + 1e-9)
+    p = (x - alpha[:, None] * y) * np.hanning(win)                          # Hann taper for overlap-add
+    h = np.zeros(n)
+    for k in range(win):
+        h[k:k + len(p)] += p[:, k]
+    return h
+
+
+METHODS = {"pos": pos_pulse, "chrom": chrom_pulse, "green": lambda rgb, fs=FS: green_pulse(rgb)}
+AGREE_BPM = 5.0          # two methods "agree" when their peaks are this close
+
+
 def pulse_signal(rgb_uniform, method="pos", fs=FS):
     """RGB trace (evenly sampled) -> band-limited pulse waveform."""
-    raw = pos_pulse(rgb_uniform, fs) if method == "pos" else green_pulse(rgb_uniform)
-    return bandpass(raw, HR_LOW, HR_HIGH, fs)
+    return bandpass(METHODS[method](rgb_uniform, fs=fs), HR_LOW, HR_HIGH, fs)
 
 
 # --------------------------------------------------------------------------
@@ -211,13 +289,14 @@ def _fill_missing(t, rgb, max_missing=0.2):
     """
     Frames where a patch had too few skin pixels are stored as NaN.
     Fill short gaps by interpolation; give up on the patch if >20% is missing.
+    Works for any number of columns (RGB, or the head-pose signals).
     """
     valid = ~np.isnan(rgb).any(axis=1)
     if valid.sum() < 10 or valid.mean() < 1.0 - max_missing:
         return None
     if valid.all():
         return rgb
-    return np.column_stack([np.interp(t, t[valid], rgb[valid, c]) for c in range(3)])
+    return np.column_stack([np.interp(t, t[valid], rgb[valid, c]) for c in range(rgb.shape[1])])
 
 
 def noise_level(normalized, fs=FS, cutoff_hz=5.0):
@@ -237,7 +316,7 @@ def noise_level(normalized, fs=FS, cutoff_hz=5.0):
 
 def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev_bpm=None,
                        use_background=True, use_harmonics=True, green_margin_db=0.0,
-                       patch_map=True, fs=FS):
+                       patch_map=True, pose=None, use_motion=True, fs=FS):
     """
     Full pipeline for one update.
 
@@ -252,6 +331,9 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
                     in green that POS cancels.
     patch_map:      also compute per-patch SNR for the on-screen map. Display
                     only; benchmarks turn it off (it is ~60% of the run time).
+    pose:           (N, K) head pose per frame from FaceMesh (x, y, scale, roll, mouth), or None.
+    use_motion:     regress head-pose effects out of each patch where the head
+                    moved enough to matter (motion_explained >= MOTION_R2_MIN).
 
     Why many small patches instead of 3 big regions? With light from one
     side, part of a cheek is lit and part is in shadow. Shadowed skin
@@ -274,12 +356,26 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     """
     t = np.asarray(times, dtype=float)
 
+    # Nuisance references: wall colour (3 signals) and head pose (4 signals).
+    references = []
     background_band = None
     if use_background and background is not None:
         bg = _fill_missing(t, np.asarray(background, dtype=float))
         if bg is not None:
             _, bg_u = resample_uniform(t, bg, fs)
             background_band = bandpass(bg_u / bg_u.mean(axis=0) - 1.0, HR_LOW, HR_HIGH, fs)
+            references.append(background_band)
+    pose_band = None
+    if use_motion and pose is not None:
+        ps = _fill_missing(t, np.asarray(pose, dtype=float))
+        if ps is not None:
+            _, ps_u = resample_uniform(t, ps, fs)
+            ps_u = (ps_u - ps_u.mean(axis=0)) / (ps_u.std(axis=0) + 1e-9)   # units don't matter, only shape
+            pose_band = bandpass(ps_u, HR_LOW, HR_HIGH, fs)
+            references.append(pose_band)
+    background_only = background_band
+    with_pose = np.hstack(references) if references else None
+    motion_patches = 0
 
     pooled, total_weight, patch_snr, patch_weight = None, 0.0, {}, {}
     for name, rgb in patch_traces.items():
@@ -288,8 +384,11 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
             patch_snr[name] = None
             continue
         _, rgb_u = resample_uniform(t, rgb, fs)
-        if background_band is not None:
-            rgb_u = remove_background(rgb_u, background_band)
+        if pose_band is not None and motion_explained(rgb_u, pose_band) >= MOTION_R2_MIN:
+            rgb_u = remove_nuisance(rgb_u, with_pose)        # wall + head pose
+            motion_patches += 1
+        elif background_only is not None:
+            rgb_u = remove_nuisance(rgb_u, background_only)  # wall only
         normalized = rgb_u / rgb_u.mean(axis=0)                # step 1
         weight = 1.0 / (noise_level(normalized, fs) + 1e-12)   # step 2
         pooled = weight * normalized if pooled is None else pooled + weight * normalized   # step 3
@@ -324,6 +423,17 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         candidates.append((snr + bias, snr, m, f0, fused, freqs, power))
     _, snr, used, f0, fused, freqs, power = max(candidates, key=lambda c: c[0])
 
+    # Cross-check: where does EACH method put the peak on its own? No tracking
+    # hint here -- the hint would pull all three toward the same value and make
+    # them agree for the wrong reason. Agreement of 3/3 means three methods with
+    # different weaknesses (motion, flicker, dim-light noise) see the same pulse.
+    method_bpm = {}
+    for m in METHODS:
+        sig = pulse_signal(pooled / total_weight, m, fs)
+        fq, pw = power_spectrum(sig / (sig.std() + 1e-12), fs)
+        method_bpm[m] = 60.0 * pick_peak(fq, pw, HR_LOW, HR_HIGH, harmonics=use_harmonics)
+    agreement = sum(1 for b in method_bpm.values() if abs(b - f0 * 60.0) <= AGREE_BPM)
+
     return {
         "bpm": f0 * 60.0,
         "snr_db": snr,
@@ -334,6 +444,9 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         "patch_snr": patch_snr,
         "patch_weight": {n: w / total_weight for n, w in patch_weight.items()},
         "background_used": background_band is not None,
+        "motion_patches": motion_patches,    # how many patches needed motion correction
+        "method_bpm": method_bpm,            # each method's own peak (cross-check)
+        "agreement": agreement,              # how many of POS / CHROM / green agree with "bpm" (1-3)
     }
 
 
