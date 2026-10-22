@@ -32,6 +32,8 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | `face_regions.py` | Skin regions, patch grid, skin filter, background boxes, lighting coach |
 | `dashboard.py` | OpenCV UI, dark and light themes |
 | `perf.py` | Stage timer and background analysis process (keeps the camera loop smooth) |
+| `liveness.py` | Liveness check prototype: pulse check + random screen-flash challenge; re-scores saved attempts |
+| `liveness_benchmark.py` | Simulated real people vs attacks (photo, mask, phone replay, virtual camera, live deepfake) |
 | `replay.py` | Re-runs every configuration on a recording against a reference BPM |
 | `synthetic_benchmark.py` | Per-window ablation on simulated lighting scenarios |
 | `session_benchmark.py` | End-to-end test of what the screen shows on simulated 2-minute sessions |
@@ -50,7 +52,7 @@ Options: `--res 640x480` (old resolution, to A/B against the default 1280x720),
 `--no-motion-correction`, `--no-background` (run the analysis inline instead of in
 a background process, to compare speed).
 
-Keys: `q` quit, `m` method (auto / pos / green), `b` background cancellation,
+Keys: `v` liveness check, `q` quit, `m` method (auto / pos / green), `b` background cancellation,
 `l` light mode (white full-screen so the screen lights your face), `r` patch SNR
 map, `p` performance readout, `s` start/stop recording (average colours per frame only, never images).
 
@@ -62,6 +64,43 @@ python session_benchmark.py --vanish     # does the number disappear when the pu
 python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
 pip install pytest && python -m pytest -q tests
 ```
+
+## Liveness check (prototype)
+
+Press `v`. **Step 1** (10-30 s): the screen turns white and the app looks for
+a pulse that shows up across the forehead and both cheeks. **Step 2** (~7 s):
+the screen flashes a random colour sequence, decided only when the check
+starts, and the app checks that the skin's tint follows it within a fraction
+of a second.
+
+| Attack | Pulse check | Flash challenge | Result |
+| --- | --- | --- | --- |
+| Printed photo, mask | no pulse | reflects | never LIVE |
+| Phone replaying a video | has a pulse | only glints in 1-3 spots | NOT LIVE |
+| Video injected as a virtual camera | has a pulse | never sees the screen | NOT LIVE |
+| Real-time face swap of a real person | carried through | carried through | **not caught (blind spot)** |
+
+Simulated results (`python liveness_benchmark.py`, 60 attempts per scenario):
+0% of photo / mask / replay / virtual-camera attacks accepted, 0% of real
+people called NOT LIVE, typical time to confirm 10 s. Real people confirmed
+LIVE, by skin tone and room light:
+
+| | bright | normal | dim |
+| --- | --- | --- | --- |
+| lighter | 100% | 100% | 100% |
+| medium | 100% | 100% | 67% |
+| darker | 100% | 15% | 0% |
+
+**Design choice:** a weak pulse can stop a LIVE result but never produces
+NOT LIVE. The first version turned "weak" into "fake" and rejected every
+simulated darker-skinned person in normal light; now they get NOT CONFIRMED
+with advice to add light. NOT LIVE is reserved for strong physical evidence
+(the face did not react to the flashes).
+
+Attempts are saved as colours only (`recordings/liveness_*`) and can be
+re-scored: `python liveness.py recordings/liveness_YYYYMMDD_HHMMSS`.
+This is a research prototype, not a security product; real attacks (a good
+OLED phone, a matte photo under a lamp) still need testing in person.
 
 ## Known limitations
 

@@ -173,7 +173,7 @@ def compose(frame, info, theme="dark"):
     if info["recording"]:
         cv2.circle(canvas, (vw - 70, 28), 8, (60, 60, 235), -1, cv2.LINE_AA)
         put(canvas, "REC", (vw - 56, 34), 0.55, (60, 60, 235))
-    hint = "q quit  m method  b bg-cancel  l light  r map  p perf  s record"
+    hint = "q quit  v liveness  m method  b bg  l light  r map  p perf  s rec"
     (hw, _), _ = cv2.getTextSize(hint, FONT, 0.42, 1)
     cv2.rectangle(canvas, (6, 6), (18 + hw, 32), (0, 0, 0), -1)
     put(canvas, hint, (12, 24), 0.42, (240, 240, 240))
@@ -181,6 +181,9 @@ def compose(frame, info, theme="dark"):
         (pw, _), _ = cv2.getTextSize(info["perf"], FONT, 0.36, 1)
         cv2.rectangle(canvas, (6, 36), (18 + pw, 56), (0, 0, 0), -1)
         put(canvas, info["perf"], (12, 51), 0.36, (170, 230, 170))
+
+    if info.get("liveness"):
+        draw_liveness_result(canvas, *info["liveness"], vw)
 
     # Side panel
     sx = vw
@@ -205,3 +208,60 @@ def compose(frame, info, theme="dark"):
         canvas = cv2.copyMakeBorder(canvas, top, target_h - h - top, left, target_w - w - left,
                                     cv2.BORDER_CONSTANT, value=(255, 255, 255))
     return canvas
+
+
+# --------------------------------------------------------------------------
+# Liveness check screens
+# --------------------------------------------------------------------------
+
+LIVENESS_SIZE = (1440, 900)       # drawn this size; full-screen mode scales it to the display
+VERDICT_COLOURS = {"LIVE": (90, 200, 60), "NOT LIVE": (60, 60, 230), "NOT CONFIRMED": (40, 170, 240)}
+
+
+def liveness_screen(frame, screen_rgb, text, progress):
+    """
+    The whole screen in the challenge colour (so it lights the face), a small
+    camera preview to stay centred, one instruction line and a progress bar.
+    screen_rgb is RGB; OpenCV draws BGR.
+    """
+    w, h = LIVENESS_SIZE
+    bgr = tuple(int(c) for c in screen_rgb[::-1])
+    canvas = np.full((h, w, 3), bgr, dtype=np.uint8)
+    # Text colour that stays readable on any challenge colour
+    luminance = 0.299 * screen_rgb[0] + 0.587 * screen_rgb[1] + 0.114 * screen_rgb[2]
+    ink = (20, 20, 20) if luminance > 140 else (245, 245, 245)
+
+    pw = 360
+    preview = cv2.resize(frame, (pw, int(frame.shape[0] * pw / frame.shape[1])), interpolation=cv2.INTER_AREA)
+    px, py = (w - pw) // 2, 120
+    canvas[py:py + preview.shape[0], px:px + pw] = preview
+    cv2.rectangle(canvas, (px - 2, py - 2), (px + pw + 1, py + preview.shape[0] + 1), ink, 2)
+
+    title = "LIVENESS CHECK"
+    (tw, _), _ = cv2.getTextSize(title, FONT, 1.1, 2)
+    cv2.putText(canvas, title, ((w - tw) // 2, 80), FONT, 1.1, ink, 2, cv2.LINE_AA)
+    (tw, _), _ = cv2.getTextSize(text, FONT, 0.7, 1)
+    ty = py + preview.shape[0] + 60
+    cv2.putText(canvas, text, ((w - tw) // 2, ty), FONT, 0.7, ink, 1, cv2.LINE_AA)
+    bx, bw = (w - 600) // 2, 600
+    cv2.rectangle(canvas, (bx, ty + 30), (bx + bw, ty + 44), ink, 1)
+    cv2.rectangle(canvas, (bx, ty + 30), (bx + int(bw * float(np.clip(progress, 0, 1))), ty + 44), ink, -1)
+    note = "Colours only are analysed on this device; no images are saved.   v = cancel"
+    (tw, _), _ = cv2.getTextSize(note, FONT, 0.5, 1)
+    cv2.putText(canvas, note, ((w - tw) // 2, h - 40), FONT, 0.5, ink, 1, cv2.LINE_AA)
+    return canvas
+
+
+def draw_liveness_result(canvas, result, lines, vw):
+    """Verdict panel over the bottom of the video area."""
+    colour = VERDICT_COLOURS.get(result, (200, 200, 200))
+    x0, y0, x1 = 10, 300, vw - 10
+    y1 = y0 + 46 + 22 * len(lines)
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.75, canvas, 0.25, 0, dst=canvas)
+    cv2.rectangle(canvas, (x0, y0), (x1, y1), colour, 2)
+    put(canvas, result, (x0 + 14, y0 + 34), 1.0, colour, 2)
+    put(canvas, "liveness prototype - not a security product", (x0 + 260, y0 + 30), 0.4, (180, 180, 180))
+    for i, line in enumerate(lines):
+        put(canvas, line[:110], (x0 + 14, y0 + 62 + 22 * i), 0.42, (235, 235, 235))
