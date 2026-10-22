@@ -144,9 +144,31 @@ def test_legacy_blanks_on_any_weak_window():
 
 def test_simulated_session_locks_near_truth():
     from session_benchmark import make_session
-    t, patches, bg, face, moving, true_bpm = make_session("lighter", 0.6, np.random.default_rng(11), seconds=40)
-    res = simulate_display(t, patches, bg, face, moving, HeartRateTracker())
+    s = make_session("lighter", 0.6, np.random.default_rng(11), seconds=40)
+    t, true_bpm = s["t"], s["true_bpm"]
+    res = simulate_display(t, s["patches"], s["background"], s["face"], s["moving"], HeartRateTracker(),
+                           pose=s["pose"])
     shown = [(now, b) for now, b, s in res if b is not None]
     assert len(shown) > 0.4 * len(res)
     err = [abs(b - np.interp(now, t, true_bpm)) for now, b in shown]
     assert np.median(err) < 3.0
+
+
+def test_short_windows_need_a_higher_snr():
+    trk = HeartRateTracker()
+    assert trk.extra_db(5.0) == trk.SHORT_WINDOW_EXTRA_DB
+    assert trk.extra_db(15.0) == 0.0 and trk.extra_db(None) == 0.0
+    # 0.5 dB is enough for a full window but not for a 5 s one
+    full = feed(HeartRateTracker(), [(70, 0.5)] * 5)
+    t5 = HeartRateTracker()
+    short = [t5.update(k * 0.5, 70, 0.5, window_sec=5.0) for k in range(5)]
+    assert full[-1].bpm is not None and short[-1].bpm is None
+
+
+def test_buffer_stores_pose():
+    buf = SampleBuffer(NAMES)
+    assert buf.pose_array() is None
+    buf.add(0.0, *frame(), pose=[0.5, 0.5, 0.3, 0.0])
+    buf.add(0.1, *frame())
+    p = buf.pose_array()
+    assert p.shape == (2, 4) and np.isnan(p[1]).all()

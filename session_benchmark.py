@@ -15,6 +15,7 @@ drifts, FaceMesh loses the face for a few frames, the head moves, and the
 camera noise is set so the SNR hovers around 0 dB (like a dim bedroom).
 
 Run:  python session_benchmark.py              (~1-3 minutes, uses all CPU cores)
+      python session_benchmark.py --start      (how fast and how right is the first number?)
       python session_benchmark.py --vanish     (does the number disappear when the pulse does?)
       python session_benchmark.py --calibrate  (measure tracker thresholds on pure noise)
 
@@ -32,14 +33,28 @@ from synthetic_benchmark import PULSE_DIRECTION, SKIN_TONES, WALL, band_noise
 from vitals_dsp import analyze_heart_rate
 from vitals_stream import HeartRateTracker, LegacyDisplay, simulate_display
 
-WINDOW_SEC, MIN_SEC, UPDATE_EVERY, MOTION_HOLD = 15.0, 8.0, 0.5, 1.5
+WINDOW_SEC, MIN_SEC, UPDATE_EVERY, MOTION_HOLD = 15.0, 5.0, 0.5, 1.5
 NOISE_LEVELS = {"ok light": 0.6, "dim": 1.1, "very dim": 1.6}   # camera noise (brightness levels)
 
 
-def make_session(tone, noise, rng, seconds=120, pulse=True, events=True):
+def make_session(tone, noise, rng, seconds=120, pulse=True, events=True, fidget=0.0, nonlinear=0.3,
+                 talking=0.0):
     """
-    Simulated per-frame patch colours for one sitting.
-    Returns times, {patch: (N,3)}, background (N,3), face_visible (N,), moving (N,), true_bpm (N,)
+    Simulated per-frame data for one sitting. Returns a dict:
+      t, patches {name: (N,3)}, background (N,3), face (N,), moving (N,),
+      pose (N,4) as FaceMesh would see it, true_bpm (N,)
+
+    fidget: 0 = sitting very still, 1 = normal fidgeting (small nods, sways and
+    tilts, in bursts, like talking or shifting in a chair). Small head motion
+    changes how much light each patch catches, so each patch's brightness
+    wobbles with the head. Deliberately NOT exactly the model the motion
+    correction assumes: the effect is partly non-linear, the pose FaceMesh
+    reports is jittery and one frame late.
+    nonlinear: size of the second-order shading term (same sign on every patch,
+    like the cosine fall-off of real shading), relative to the linear term.
+    talking: 0 = silent, 1 = talking in bursts. Jaw movement (1-4 Hz, inside the
+    heart-rate band) stretches the cheeks, changing their brightness; the
+    forehead barely moves. FaceMesh reports the lip gap, jittery and 1 frame late.
     """
     t = np.cumsum(rng.normal(1 / 30, 0.004, int(seconds * 30)))
     t -= t[0]
@@ -66,24 +81,45 @@ def make_session(tone, noise, rng, seconds=120, pulse=True, events=True):
         shine[sel] += 0.02 * np.sin(2 * np.pi * 1.3 * (t[sel] - start))
         light[sel] *= 1 + 0.01 * np.sin(2 * np.pi * 0.9 * (t[sel] - start))[:, None]
 
+    # Small continuous head motion: 4 pose signals (x, y, scale, roll), in bursts.
+    envelope = np.clip(band_noise(t, 0.02, 0.2, 1.0, rng) + 0.3, 0, None)
+    head = np.column_stack([band_noise(t, 0.15, 2.0, 1.0, rng) for _ in range(4)]) * envelope[:, None]
+    # Talking: jaw opening in sentence-length bursts.
+    speech = (band_noise(t, 0.05, 0.3, 1.0, rng) > -0.2).astype(float)          # talking ~60% of the time
+    speech = np.convolve(speech, np.ones(9) / 9, mode="same")
+    jaw = np.abs(band_noise(t, 1.0, 4.0, 1.0, rng)) * speech * (talking > 0)
+    jaw -= jaw.mean()
+    pose_true = np.column_stack([head, jaw])
+    observed = np.roll(pose_true, 1, axis=0) + rng.normal(0, 0.15, pose_true.shape)   # 1 frame late + jitter
+
     skin, strength = SKIN_TONES[tone]
     patches = {}
     for name in PATCHES:
         amp = 0.0012 * strength * (1.0 if patch_region(name) == "forehead" else 0.7)
-        clean = light * (skin + amp * np.linalg.norm(skin) * wave[:, None] * PULSE_DIRECTION
-                         + shine[:, None] * np.linalg.norm(skin) * np.ones(3) / np.sqrt(3))
+        shade_coef = rng.normal(0, 0.0015 * fidget, 4)        # how this patch's shading follows the head
+        spec_coef = rng.normal(0, 0.0006 * fidget, 4)         # and its shine
+        shading = 1 + head @ shade_coef - nonlinear * (head ** 2) @ np.abs(shade_coef)
+        jaw_coef = rng.normal(0, 0.003 if "cheek" in name else 0.0005) * talking
+        shading = shading + jaw_coef * jaw - nonlinear * abs(jaw_coef) * jaw ** 2
+        patch_shine = shine + head @ spec_coef
+        clean = light * (skin * shading[:, None]
+                         + amp * np.linalg.norm(skin) * wave[:, None] * PULSE_DIRECTION
+                         + patch_shine[:, None] * np.linalg.norm(skin) * np.ones(3) / np.sqrt(3))
         patches[name] = clean + rng.normal(0, noise, clean.shape)
     background = light * WALL + rng.normal(0, noise / 3, (t.size, 3))
-    return t, patches, background, face, moving, true_bpm
+    return {"t": t, "patches": patches, "background": background, "face": face,
+            "moving": moving, "pose": observed, "true_bpm": true_bpm}
 
 
-def stream(session, display, max_gap_sec, drop_motion=True):
+def stream(session, display, max_gap_sec, drop_motion=True, use_motion=True, min_sec=None):
     """Run a simulated session through the app's logic; adds the true BPM to each update."""
-    t, patches, background, face, moving, true_bpm = session
-    res = simulate_display(t, patches, background, face, moving, display, max_gap_sec,
-                           drop_motion=drop_motion, window_sec=WINDOW_SEC, min_sec=MIN_SEC,
-                           update_every=UPDATE_EVERY, motion_hold=MOTION_HOLD)
-    return [(now, bpm, state, float(np.interp(now, t, true_bpm))) for now, bpm, state in res if now >= MIN_SEC]
+    s = session
+    res = simulate_display(s["t"], s["patches"], s["background"], s["face"], s["moving"], display,
+                           max_gap_sec, drop_motion=drop_motion, window_sec=WINDOW_SEC,
+                           min_sec=MIN_SEC if min_sec is None else min_sec,
+                           update_every=UPDATE_EVERY, motion_hold=MOTION_HOLD,
+                           pose=s["pose"] if use_motion else None)
+    return [(now, bpm, state, float(np.interp(now, s["t"], s["true_bpm"]))) for now, bpm, state in res]
 
 
 def score(results, minutes):
@@ -103,46 +139,67 @@ def score(results, minutes):
     }
 
 
+LOGICS = ("v3 (old)", "v4", "v5")   # what is compared in the main table
+
+
 def run_one(job):
-    """One session through both display logics (runs in a worker process)."""
-    label, noise, tone, seed, tracker_settings = job
-    session = make_session(tone, noise, np.random.default_rng(seed))
-    old = stream(session, LegacyDisplay(), max_gap_sec=0.0, drop_motion=False)
-    new = stream(session, HeartRateTracker(**tracker_settings), max_gap_sec=1.0)
-    return label, tone, old, new
+    """One session through every display logic (runs in a worker process)."""
+    label, noise, motion, tone, seed, tracker_settings = job
+    rng = np.random.default_rng(seed)
+    # Fidgeting sessions get a random amount of non-linearity (mild to harsh), so the
+    # motion correction is not only tested on the case it is designed for.
+    session = make_session(tone, noise, rng, fidget=1.5 if motion == "fidgeting" else 0.0,
+                           nonlinear=rng.uniform(0.1, 0.3))
+    v4_settings = dict(tracker_settings or {}, SHORT_WINDOW_EXTRA_DB=0.0)
+    runs = {
+        "v3 (old)": stream(session, LegacyDisplay(), 0.0, drop_motion=False, use_motion=False, min_sec=8.0),
+        "v4": stream(session, HeartRateTracker(**v4_settings), 1.0, use_motion=False, min_sec=8.0),
+        "v5": stream(session, HeartRateTracker(**(tracker_settings or {})), 1.0, use_motion=True, min_sec=5.0),
+    }
+    return label, motion, tone, runs
 
 
-def print_row(label, name, results, minutes):
-    m = score(results, minutes)
-    print(f"{label:<10}{name:<16}{m['coverage']:>9.0%}{m['drops/min']:>10.1f}{m['MAE']:>7.1f}"
+def first_number(results):
+    return next((now for now, bpm, _, _ in results if bpm is not None), None)
+
+
+def print_row(label, name, results, minutes, first=None):
+    m = score([r for r in results if r[0] >= 8.0], minutes)      # coverage counted from 8 s for all
+    first_txt = f"{first:.1f} s" if first is not None else "-"
+    print(f"{label:<22}{name:<10}{first_txt:>8}{m['coverage']:>9.0%}{m['drops/min']:>10.1f}{m['MAE']:>7.1f}"
           f"{m['<=5']:>9.0%}{m['>10']:>9.0%}{m['held']:>7.0%}")
 
 
-def main(sessions_per_cell=2, seed=7, tracker_settings=None):
+def main(sessions_per_cell=3, seed=7, tracker_settings=None):
     from multiprocessing import Pool
-    jobs = [(label, noise, tone, seed * 1000 + i, tracker_settings or {})
-            for label, noise in NOISE_LEVELS.items()
+    jobs = [(label, noise, motion, tone, seed * 1000 + i, tracker_settings or {})
+            for label, noise in NOISE_LEVELS.items() for motion in ("still", "fidgeting")
             for tone in SKIN_TONES for i in range(sessions_per_cell)]
     with Pool() as pool:
         done = pool.map(run_one, jobs)
-    minutes = (120 - MIN_SEC) / 60
+    minutes = (120 - 8.0) / 60
 
     print("Simulated 2-minute sessions, streamed like the live app (pooled over all sessions).")
-    print("coverage = time a number is on screen; >10 off = share of shown time more than 10 BPM wrong\n")
-    hdr = (f"{'light':<10}{'display logic':<16}{'coverage':>9}{'drops/min':>10}{'MAE':>7}"
+    print("v3 = original display, v4 = tracker, v5 = tracker + motion correction + early start")
+    print("first = median seconds to the first number; coverage = time a number is on screen (from 8 s);")
+    print(">10 off = share of shown time more than 10 BPM wrong (a confident wrong number)\n")
+    hdr = (f"{'condition':<22}{'logic':<10}{'first':>8}{'coverage':>9}{'drops/min':>10}{'MAE':>7}"
            f"{'<=5 BPM':>9}{'>10 off':>9}{'held':>7}")
     print(hdr + "\n" + "-" * len(hdr))
     for label in NOISE_LEVELS:
-        group = [d for d in done if d[0] == label]
-        n_min = minutes * len(group)
-        print_row(label, "v3 (old)", [r for d in group for r in d[2]], n_min)
-        print_row(label, "v4 tracker", [r for d in group for r in d[3]], n_min)
-        print()
+        for motion in ("still", "fidgeting"):
+            group = [d for d in done if d[0] == label and d[1] == motion]
+            for name in LOGICS:
+                firsts = [first_number(d[3][name]) for d in group]
+                firsts = [f for f in firsts if f is not None]
+                print_row(f"{label}, {motion}", name, [r for d in group for r in d[3][name]],
+                          minutes * len(group), np.median(firsts) if firsts else None)
+            print()
 
-    print("v4 tracker by simulated skin tone (all light levels):")
+    print("v5 by simulated skin tone (all conditions):")
     for tone in SKIN_TONES:
-        group = [d for d in done if d[1] == tone]
-        print_row("", tone, [r for d in group for r in d[3]], minutes * len(group))
+        group = [d for d in done if d[2] == tone]
+        print_row("", tone, [r for d in group for r in d[3]["v5"]], minutes * len(group))
 
 
 def vanish_job(seed, tracker_settings=None):
@@ -151,17 +208,16 @@ def vanish_job(seed, tracker_settings=None):
     light and camera noise (think: lights switched off, or a photo of a face).
     Returns, for v3 and v4: (linger seconds, share of 80-120 s showing a number).
     """
-    with_pulse = make_session("lighter", 0.6, np.random.default_rng(seed))
+    session = make_session("lighter", 0.6, np.random.default_rng(seed))
     without = make_session("lighter", 0.6, np.random.default_rng(seed + 999), pulse=False, events=False)
-    t, patches, bg, face, moving, true_bpm = with_pulse
-    cut = t >= 60
-    patches = {n: np.where(cut[:, None], without[1][n][:t.size], patches[n]) for n in patches}
-    bg = np.where(cut[:, None], without[2][:t.size], bg)
-    session = (t, patches, bg, face, moving, true_bpm)
+    cut = session["t"] >= 60
+    session["patches"] = {n: np.where(cut[:, None], without["patches"][n], v)
+                          for n, v in session["patches"].items()}
+    session["background"] = np.where(cut[:, None], without["background"], session["background"])
     out = []
     for display, gap, drop in ((LegacyDisplay(), 0.0, False),
                                (HeartRateTracker(**(tracker_settings or {})), 1.0, True)):
-        res = stream(session, display, gap, drop_motion=drop)
+        res = stream(session, display, gap, drop_motion=drop, min_sec=8.0)
         after = [(now, bpm) for now, bpm, _, _ in res if now >= 60]
         first_gone = next((now for now, bpm in after if bpm is None), 120.0)
         noise_only = [bpm is not None for now, bpm in after if now >= 80]   # window is 100% noise by now
@@ -183,9 +239,52 @@ def vanish(sessions=24):
         res = np.array(pool.map(vanish_job, range(sessions)))      # (sessions, 2 logics, 2 metrics)
     print(f"Pulse removed at t = 60 s ({sessions} sessions).")
     print(f"{'display logic':<14}{'linger median':>15}{'linger worst':>14}{'false reading':>15}")
-    for k, name in enumerate(("v3 (old)", "v4 tracker")):
+    for k, name in enumerate(("v3 (old)", "v5 (current)")):
         linger, false = res[:, k, 0], res[:, k, 1]
         print(f"{name:<14}{np.median(linger):>13.1f} s{linger.max():>12.1f} s{false.mean():>15.1%}")
+
+
+START_CONFIGS = {   # name: (start analysing after, extra dB for short windows)
+    "wait 8 s (v4)": (8.0, 0.0),
+    "start at 5 s, no extra bar": (5.0, 0.0),
+    "start at 5 s + stricter bar": (5.0, 1.0),
+}
+
+
+def start_job(args):
+    name, noise, pulse, seed = args
+    min_sec, extra = START_CONFIGS[name]
+    s = make_session("medium", noise, np.random.default_rng(seed), seconds=25, pulse=pulse, events=False)
+    res = stream(s, HeartRateTracker(SHORT_WINDOW_EXTRA_DB=extra), 1.0, min_sec=min_sec)
+    first = next((now for now, bpm, _, _ in res if bpm is not None), None)
+    right = next((abs(bpm - truth) <= 5 for _, bpm, _, truth in res if bpm is not None), None)
+    shown = np.mean([bpm is not None for now, bpm, _, _ in res if now <= 20])
+    return name, noise, pulse, first, right, shown
+
+
+def start(sessions=60):
+    """
+    How fast does the first number appear, and is it right?
+    With a pulse: seconds until the first number, and whether that first
+    number is within 5 BPM. Without a pulse: share of the first 20 s showing a
+    (necessarily false) number.
+    """
+    from multiprocessing import Pool
+    jobs = [(name, noise, pulse, 4000 + i) for name in START_CONFIGS for noise in (0.6, 1.1)
+            for pulse in (True, False) for i in range(sessions)]
+    with Pool() as pool:
+        res = pool.map(start_job, jobs)
+    print(f"Medium skin tone, sitting still, {sessions} sessions per cell.")
+    print(f"{'':<38}{'first number (median s)':>25}{'first number right':>20}{'false, no pulse':>17}")
+    for label, noise in (("ok light", 0.6), ("dim", 1.1)):
+        for name in START_CONFIGS:
+            with_p = [r for r in res if r[0] == name and r[1] == noise and r[2]]
+            without = [r for r in res if r[0] == name and r[1] == noise and not r[2]]
+            firsts = [r[3] if r[3] is not None else 25.0 for r in with_p]
+            right = [r[4] for r in with_p if r[4] is not None]
+            print(f"{label + ': ' + name:<38}{np.median(firsts):>23.1f} s{np.mean(right):>20.0%}"
+                  f"{np.mean([r[5] for r in without]):>17.1%}")
+        print()
 
 
 def calibrate(windows=600, seed=3):
@@ -201,8 +300,8 @@ def calibrate(windows=600, seed=3):
     enter = keep = 0
     snrs = []
     for k in range(windows):
-        t, patches, bg, *_ = make_session("medium", 1.1, rng, seconds=WINDOW_SEC + 0.5,
-                                           pulse=False, events=False)
+        sess = make_session("medium", 1.1, rng, seconds=WINDOW_SEC + 0.5, pulse=False, events=False)
+        t, patches, bg = sess["t"], sess["patches"], sess["background"]
         track = rng.uniform(55, 100)
         r = analyze_heart_rate(t, patches, bg, method="auto", prev_bpm=track, patch_map=False)
         r_free = analyze_heart_rate(t, patches, bg, method="auto", patch_map=False)
@@ -213,21 +312,25 @@ def calibrate(windows=600, seed=3):
     print(f"Pure-noise windows: {windows}")
     print(f"  SNR percentiles   50%: {np.percentile(snrs, 50):+.1f} dB   90%: {np.percentile(snrs, 90):+.1f} dB"
           f"   99%: {np.percentile(snrs, 99):+.1f} dB")
-    print(f"  false 'enter' rate (SNR >= {trk.SNR_ENTER:+.0f} dB):                     {enter / windows:.1%}")
-    print(f"  false 'keep' rate  (SNR >= {trk.SNR_KEEP:+.0f} dB and within {trk.GATE_BPM:.0f} BPM of track): {keep / windows:.1%}")
-    print("Note: these are per-window rates. The tracker also needs two agreeing windows to")
-    print("start, and a jump to persist 2 s, so false READINGS on screen are rarer still.")
+    print(f"  false 'enter' rate (SNR >= {trk.SNR_ENTER:+.1f} dB):                       {enter / windows:.1%}")
+    print(f"  false 'keep' rate  (SNR >= {trk.SNR_KEEP:+.1f} dB and within {trk.GATE_BPM:.0f} BPM of track): {keep / windows:.1%}")
+    print("Note: these are per-window rates. The tracker also needs a reading to persist")
+    print(f"{trk.ACQUIRE_SEC:.1f} s to start and a jump to persist {trk.CONFIRM_SEC:.0f} s, and a weak window only")
+    print(f"counts within {trk.REFRESH_SEC:.0f} s of a strong one, so false READINGS on screen are rarer.")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--calibrate", action="store_true", help="measure false-accept rates on pure noise")
+    ap.add_argument("--start", action="store_true", help="how fast and how right is the first number?")
     ap.add_argument("--vanish", action="store_true", help="test how fast the number disappears when the pulse does")
-    ap.add_argument("--sessions", type=int, default=2, help="sessions per skin tone per light level")
+    ap.add_argument("--sessions", type=int, default=3, help="sessions per skin tone per condition")
     args = ap.parse_args()
     if args.calibrate:
         calibrate()
     elif args.vanish:
         vanish()
+    elif args.start:
+        start()
     else:
         main(args.sessions)

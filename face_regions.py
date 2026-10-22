@@ -194,7 +194,9 @@ def draw_overlay(frame, regions, patches, patch_snr, background_boxes):
             color = tint_colors[snr_level(patch_snr.get(name))]
             tint[sub][kept[sub] > 0] = color
         crop[:] = cv2.addWeighted(tint, 0.35, crop, 0.65, 0)
+    k = max(1.0, frame.shape[1] / 640)      # the frame is shrunk to 640 wide for display
     for x0, y0, x1, y1 in background_boxes:
-        cv2.rectangle(out, (x0, y0), (x1, y1), (230, 230, 230), 1)
-        cv2.putText(out, "bg ref", (x0 + 4, y0 + 14), cv2.FONT_HERSHEY_DUPLEX, 0.4, (230, 230, 230), 1, cv2.LINE_AA)
+        cv2.rectangle(out, (x0, y0), (x1, y1), (230, 230, 230), int(round(k)))
+        cv2.putText(out, "bg ref", (x0 + int(4 * k), y0 + int(14 * k)), cv2.FONT_HERSHEY_DUPLEX,
+                    0.4 * k, (230, 230, 230), int(round(k)), cv2.LINE_AA)
     return out
