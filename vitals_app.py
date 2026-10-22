@@ -18,6 +18,7 @@ Keys:  q quit
        l light mode (white full-screen dashboard = your screen becomes a front light)
        r show/hide the patch SNR map
        p show/hide the performance readout
+       v liveness check: pulse + random screen-flash challenge (prototype, see liveness.py)
        s start/stop recording (average colours only, never images) -> replay.py
 
 Camera-based vitals ESTIMATION for learning/portfolio purposes. Not a medical
@@ -35,10 +36,11 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from dashboard import compose
+from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
 from face_regions import (PATCHES, REGIONS, assess_lighting, background_color, draw_overlay,
                           extract_patch_colors, landmarks_to_array, patch_region)
+from liveness import CHALLENGE_SEC, LivenessSession
 from vitals_dsp import analyze_heart_rate
 from vitals_stream import HeartRateTracker, SampleBuffer
 
@@ -174,6 +176,8 @@ def main():
     last_update, last_motion, last_small_motion = 0.0, -99.0, -99.0
     last_frame_time, fps = None, 0.0
     rec_file = rec_writer = None
+    liveness, liveness_shown_until, screen_rgb = None, -1.0, (255, 255, 255)
+    liveness_result = None
     t0 = time.monotonic()
 
     def reset_all():
@@ -243,14 +247,18 @@ def main():
                 # Fast-motion frames are stored as gaps (filled by interpolation), so a
                 # head turn doesn't poison the next 15 s of windows.
                 moving_now = big_move
-                if big_move:
+                if liveness is not None:
+                    pass                                   # heart-rate pipeline paused during a liveness check
+                elif big_move:
                     buffer.add_unusable(now)
                 else:
                     buffer.add(now, colors, bg_rgb, pose)
 
             have = buffer.span()
             moving = now - last_motion < MOTION_HOLD
-            if have < MIN_SEC:
+            if liveness is not None:
+                pass
+            elif have < MIN_SEC:
                 lighting = assess_lighting(stats, fps)
                 reading = tracker.update(now)
             elif now - last_update >= UPDATE_EVERY and not analyzer.busy():   # one job at a time
@@ -279,6 +287,8 @@ def main():
                 status = "Weak signal - holding last reading"
             elif reading.bpm is None:
                 status = lighting[1] if lighting[0] != "good" else "Weak signal - keep still"
+        elif liveness is not None:
+            prev_nose = None
         else:
             # Brief loss (blink, hand passing): keep the data and ride it out.
             prev_nose = None
@@ -292,6 +302,38 @@ def main():
 
         draw_start = time.perf_counter()
         frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)   # display size
+
+        # ---- Liveness check: feed this frame, draw the full-screen challenge, skip the dashboard
+        if liveness is not None:
+            # screen_rgb is what was on screen while this frame was captured (drawn last loop)
+            running = liveness.frame(now, colors, bg_rgb, pose, emitted=screen_rgb)
+            if running:
+                screen_rgb = liveness.screen_colour(now)
+                if liveness.phase == "pulse":
+                    progress = min((now - liveness.started) / 30.0, 1.0)
+                else:
+                    total = liveness.LEAD_SEC + CHALLENGE_SEC + liveness.TAIL_SEC
+                    progress = (now - liveness.flash_start) / total
+                cv2.imshow(WINDOW, liveness_screen(frame, screen_rgb, liveness.progress_text(now), progress))
+            else:
+                prefix = time.strftime("recordings/liveness_%Y%m%d_%H%M%S")
+                os.makedirs("recordings", exist_ok=True)
+                if liveness.save(prefix):
+                    print(f"liveness attempt saved (colours only): {prefix}_pulse.csv / _flash.csv")
+                print("liveness:", liveness.result, "|", " | ".join(liveness.evidence()))
+                liveness_result = (liveness.result, liveness.evidence())
+                liveness_shown_until = now + 15.0
+                liveness, screen_rgb = None, (255, 255, 255)
+                set_window_mode(light_mode)
+                reset_all()                     # the flashes corrupted the heart-rate data: start fresh
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("v"):                 # cancel
+                liveness, screen_rgb = None, (255, 255, 255)
+                set_window_mode(light_mode)
+                reset_all()
+            elif key == ord("q"):
+                break
+            continue
 
         while trend and now - trend[0][0] > 60:
             trend.popleft()
@@ -320,6 +362,7 @@ def main():
             "pulse": analysis["pulse"] if analysis else None,
             "peak_bpm": analysis["bpm"] if analysis else None,
             "perf": perf_line(timer, fps, analyzer.background) if show_perf else None,
+            "liveness": liveness_result if now < liveness_shown_until else None,
         }
         cv2.imshow(WINDOW, compose(frame, info, theme="light" if light_mode else "dark"))
         timer.add("ui", (time.perf_counter() - draw_start) * 1000)
@@ -362,6 +405,12 @@ def main():
             show_map = not show_map
         elif key == ord("p"):
             show_perf = not show_perf
+        elif key == ord("v"):
+            # Unpredictable sequence: numpy's default generator is seeded from the OS's randomness.
+            liveness = LivenessSession(now, PATCHES, rng=np.random.default_rng())
+            liveness_shown_until = -1.0
+            set_window_mode(True)               # full screen: the screen is the light source
+            print("liveness check started")
         elif key == ord("s"):
             if rec_writer is None:
                 rec_file, rec_writer = start_recording()
