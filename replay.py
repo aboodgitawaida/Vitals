@@ -38,7 +38,7 @@ import numpy as np
 
 from face_regions import patch_region
 from vitals_dsp import analyze_heart_rate
-from vitals_stream import HeartRateTracker, LegacyDisplay, simulate_display
+from vitals_stream import POSE_FIELDS, HeartRateTracker, LegacyDisplay, simulate_display
 
 CONFIGS = {   # name: (method, use patches?, background?, harmonics?, motion correction?)
     "green, 3 regions": ("green", False, False, False, False),
@@ -84,11 +84,13 @@ def load_session(path):
     moving = flag("moving", False)
 
     # v5 recordings also store head pose (for motion correction).
+    # (v5 recordings have 4 pose signals; later ones add mouth opening.)
     pose = None
-    if "pose_x" in col:
-        pose = np.full((len(data), 4), np.nan)
+    fields = [k for k in POSE_FIELDS if f"pose_{k}" in col]
+    if fields:
+        pose = np.full((len(data), len(fields)), np.nan)
         for i, r in enumerate(data):
-            vals = [r[col[f"pose_{k}"]] for k in ("x", "y", "scale", "roll")]
+            vals = [r[col[f"pose_{k}"]] for k in fields]
             if all(vals):
                 pose[i] = [float(v) for v in vals]
     return times, patches, background, face, moving, pose

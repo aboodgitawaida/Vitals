@@ -481,8 +481,10 @@ def save_attempt(prefix, patch_names, pulse_data, flash_data):
                 w.writerow(row)
 
     t, traces, bg, pose = pulse_data
-    pose = pose if pose is not None else np.full((len(t), 4), np.nan)
-    write(prefix + "_pulse.csv", t, ["pose_x", "pose_y", "pose_scale", "pose_roll"], pose, traces, bg)
+    pose = pose if pose is not None else np.full((len(t), 5), np.nan)
+    from vitals_stream import POSE_FIELDS
+    pose_cols = [f"pose_{k}" for k in POSE_FIELDS][:pose.shape[1]]
+    write(prefix + "_pulse.csv", t, pose_cols, pose, traces, bg)
     t, emitted, traces, bg = flash_data
     write(prefix + "_flash.csv", t, ["emit_r", "emit_g", "emit_b"], emitted, traces, bg)
 
@@ -501,7 +503,10 @@ def load_attempt(prefix):
         bg = series.pop("background", None)
         return t, extra, series, bg
 
-    t, pose, traces, bg = read(prefix + "_pulse.csv", ["pose_x", "pose_y", "pose_scale", "pose_roll"])
+    from vitals_stream import POSE_FIELDS
+    with open(prefix + "_pulse.csv") as f:
+        header = next(csv.reader(f))
+    t, pose, traces, bg = read(prefix + "_pulse.csv", [f"pose_{k}" for k in POSE_FIELDS if f"pose_{k}" in header])
     pulse = (t, traces, bg, None if np.isnan(pose).all() else pose)
     t, emitted, traces, bg = read(prefix + "_flash.csv", ["emit_r", "emit_g", "emit_b"])
     return pulse, (t, emitted, traces, bg)

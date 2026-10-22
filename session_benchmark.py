@@ -37,7 +37,8 @@ WINDOW_SEC, MIN_SEC, UPDATE_EVERY, MOTION_HOLD = 15.0, 5.0, 0.5, 1.5
 NOISE_LEVELS = {"ok light": 0.6, "dim": 1.1, "very dim": 1.6}   # camera noise (brightness levels)
 
 
-def make_session(tone, noise, rng, seconds=120, pulse=True, events=True, fidget=0.0, nonlinear=0.3):
+def make_session(tone, noise, rng, seconds=120, pulse=True, events=True, fidget=0.0, nonlinear=0.3,
+                 talking=0.0):
     """
     Simulated per-frame data for one sitting. Returns a dict:
       t, patches {name: (N,3)}, background (N,3), face (N,), moving (N,),
@@ -51,6 +52,9 @@ def make_session(tone, noise, rng, seconds=120, pulse=True, events=True, fidget=
     reports is jittery and one frame late.
     nonlinear: size of the second-order shading term (same sign on every patch,
     like the cosine fall-off of real shading), relative to the linear term.
+    talking: 0 = silent, 1 = talking in bursts. Jaw movement (1-4 Hz, inside the
+    heart-rate band) stretches the cheeks, changing their brightness; the
+    forehead barely moves. FaceMesh reports the lip gap, jittery and 1 frame late.
     """
     t = np.cumsum(rng.normal(1 / 30, 0.004, int(seconds * 30)))
     t -= t[0]
@@ -80,7 +84,13 @@ def make_session(tone, noise, rng, seconds=120, pulse=True, events=True, fidget=
     # Small continuous head motion: 4 pose signals (x, y, scale, roll), in bursts.
     envelope = np.clip(band_noise(t, 0.02, 0.2, 1.0, rng) + 0.3, 0, None)
     head = np.column_stack([band_noise(t, 0.15, 2.0, 1.0, rng) for _ in range(4)]) * envelope[:, None]
-    observed = np.roll(head, 1, axis=0) + rng.normal(0, 0.15, head.shape)   # 1 frame late + jitter
+    # Talking: jaw opening in sentence-length bursts.
+    speech = (band_noise(t, 0.05, 0.3, 1.0, rng) > -0.2).astype(float)          # talking ~60% of the time
+    speech = np.convolve(speech, np.ones(9) / 9, mode="same")
+    jaw = np.abs(band_noise(t, 1.0, 4.0, 1.0, rng)) * speech * (talking > 0)
+    jaw -= jaw.mean()
+    pose_true = np.column_stack([head, jaw])
+    observed = np.roll(pose_true, 1, axis=0) + rng.normal(0, 0.15, pose_true.shape)   # 1 frame late + jitter
 
     skin, strength = SKIN_TONES[tone]
     patches = {}
@@ -89,6 +99,8 @@ def make_session(tone, noise, rng, seconds=120, pulse=True, events=True, fidget=
         shade_coef = rng.normal(0, 0.0015 * fidget, 4)        # how this patch's shading follows the head
         spec_coef = rng.normal(0, 0.0006 * fidget, 4)         # and its shine
         shading = 1 + head @ shade_coef - nonlinear * (head ** 2) @ np.abs(shade_coef)
+        jaw_coef = rng.normal(0, 0.003 if "cheek" in name else 0.0005) * talking
+        shading = shading + jaw_coef * jaw - nonlinear * abs(jaw_coef) * jaw ** 2
         patch_shine = shine + head @ spec_coef
         clean = light * (skin * shading[:, None]
                          + amp * np.linalg.norm(skin) * wave[:, None] * PULSE_DIRECTION
