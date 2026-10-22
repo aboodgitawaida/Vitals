@@ -173,10 +173,14 @@ def compose(frame, info, theme="dark"):
     if info["recording"]:
         cv2.circle(canvas, (vw - 70, 28), 8, (60, 60, 235), -1, cv2.LINE_AA)
         put(canvas, "REC", (vw - 56, 34), 0.55, (60, 60, 235))
-    hint = "q quit  m method  b bg-cancel  l light  r map  s record"
+    hint = "q quit  m method  b bg-cancel  l light  r map  p perf  s record"
     (hw, _), _ = cv2.getTextSize(hint, FONT, 0.42, 1)
     cv2.rectangle(canvas, (6, 6), (18 + hw, 32), (0, 0, 0), -1)
     put(canvas, hint, (12, 24), 0.42, (240, 240, 240))
+    if info.get("perf"):
+        (pw, _), _ = cv2.getTextSize(info["perf"], FONT, 0.36, 1)
+        cv2.rectangle(canvas, (6, 36), (18 + pw, 56), (0, 0, 0), -1)
+        put(canvas, info["perf"], (12, 51), 0.36, (170, 230, 170))
 
     # Side panel
     sx = vw

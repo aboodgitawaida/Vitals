@@ -9,13 +9,15 @@ webcam (1280x720) -> FaceMesh on a 640-wide copy (fast)
        -> inverse-noise-weighted pooling -> POS or green (auto-selected)
        -> harmonic-aware FFT peak -> tracker (lock / hold / lost) -> dashboard
 
-Run:   python vitals_app.py               (HD sampling, 1280x720)
-       python vitals_app.py --res 640x480 (old resolution, for A/B comparison)
+Run:   python vitals_app.py                 (HD sampling, 1280x720, analysis in a background process)
+       python vitals_app.py --res 640x480   (old resolution, for A/B comparison)
+       python vitals_app.py --no-background (analysis inline, to compare speed)
 Keys:  q quit
        m method: AUTO -> POS -> GREEN
        b background cancellation on/off
        l light mode (white full-screen dashboard = your screen becomes a front light)
        r show/hide the patch SNR map
+       p show/hide the performance readout
        s start/stop recording (average colours only, never images) -> replay.py
 
 Camera-based vitals ESTIMATION for learning/portfolio purposes. Not a medical
@@ -34,6 +36,7 @@ import mediapipe as mp
 import numpy as np
 
 from dashboard import compose
+from perf import BackgroundAnalyzer, StageTimer
 from face_regions import (PATCHES, REGIONS, assess_lighting, background_color, draw_overlay,
                           extract_patch_colors, landmarks_to_array, patch_region)
 from vitals_dsp import analyze_heart_rate
@@ -131,15 +134,31 @@ def region_summary(analysis):
     return summary
 
 
+def perf_line(timer, fps, background):
+    """
+    One line saying where each frame's time goes. "work" is everything we do
+    per frame; at 30 fps the budget is 33 ms, and as long as work stays under
+    it, the camera (not our code) sets the frame rate.
+    """
+    g = lambda k: f"{timer.get(k):.0f}" if timer.get(k) is not None else "-"
+    where = "background" if background else "inline"
+    return (f"{fps:.0f} fps | work {g('work')} ms/frame (mesh {g('mesh')}, patches {g('patches')}, "
+            f"draw {g('draw')}, ui {g('ui')}) | analysis {g('analysis')} ms, {where}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Camera-based heart-rate estimation (not a medical device).")
     ap.add_argument("--res", default="1280x720", help="camera resolution, e.g. 1280x720 (default) or 640x480")
     ap.add_argument("--no-motion-correction", action="store_true", help="turn off head-pose regression")
+    ap.add_argument("--no-background", action="store_true",
+                    help="run the analysis inline instead of in a background process")
     args = ap.parse_args()
     cam_w, cam_h = (int(v) for v in args.res.lower().split("x"))
     use_motion = not args.no_motion_correction
 
     cap = open_camera(cam_w, cam_h)
+    analyzer = BackgroundAnalyzer(background=not args.no_background)
+    timer = StageTimer()
     face_mesh = mp.solutions.face_mesh.FaceMesh(
         max_num_faces=1, refine_landmarks=False,
         min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -150,7 +169,7 @@ def main():
     reading = tracker.reading(0.0)
     trend = deque()                                  # (time, bpm or None) for the 60 s trend
     analysis, smooth_lm, prev_nose = None, None, None
-    method_idx, use_background, light_mode, show_map = 0, True, False, True
+    method_idx, use_background, light_mode, show_map, show_perf = 0, True, False, True, True
     lighting = ("none", "Light: waiting for face")
     last_update, last_motion, last_small_motion = 0.0, -99.0, -99.0
     last_frame_time, fps = None, 0.0
@@ -161,12 +180,16 @@ def main():
         nonlocal analysis, reading
         buffer.reset()
         tracker.reset()
+        analyzer.invalidate()                      # a result still in flight is now stale
         analysis, reading = None, tracker.reading(0.0)
 
     while True:
-        ok, frame = cap.read()
+        frame_start = time.perf_counter()
+        with timer.stage("camera"):
+            ok, frame = cap.read()
         if not ok:
             break
+        work_start = time.perf_counter()           # time from here on is OUR work, not waiting for the camera
         now = time.monotonic() - t0
         if last_frame_time is not None:
             fps = 0.9 * fps + 0.1 / max(now - last_frame_time, 1e-3)
@@ -178,8 +201,20 @@ def main():
         small = cv2.resize(full, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         # FaceMesh runs on the small copy (fast). Its landmarks are fractions of the image,
         # so they map straight onto the full-resolution frame, where colours are measured.
-        result = face_mesh.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+        with timer.stage("mesh"):
+            result = face_mesh.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
         frame = full
+
+        # Collect a finished background analysis, if any. It was computed from a snapshot
+        # taken a few frames ago, so the tracker is updated with THAT snapshot's time.
+        done = analyzer.poll()
+        if done is not None:
+            (snap_time, snap_span, snap_moving), analysis, analysis_ms = done
+            timer.add("analysis", analysis_ms)
+            reading = tracker.update(snap_time, analysis and analysis["bpm"],
+                                     analysis and analysis["snr_db"], usable=not snap_moving,
+                                     window_sec=snap_span)
+            trend.append((snap_time, reading.bpm))
         status, colors, bg_rgb, moving_now, pose = "", None, None, False, None
         method = METHODS[method_idx]
 
@@ -200,41 +235,41 @@ def main():
             big_move = movement > MOTION_LIMIT
             smooth_lm = lm if smooth_lm is None or big_move else SMOOTHING * smooth_lm + (1 - SMOOTHING) * lm
 
-            colors, patches, regions, stats = extract_patch_colors(frame, smooth_lm)
-            bg_rgb, bg_boxes = background_color(frame, smooth_lm)
-            pose = head_pose(lm, w, h)                     # raw (unsmoothed) landmarks: real head motion
+            with timer.stage("patches"):
+                colors, patches, regions, stats = extract_patch_colors(frame, smooth_lm)
+                bg_rgb, bg_boxes = background_color(frame, smooth_lm)
+                pose = head_pose(lm, w, h)                 # raw (unsmoothed) landmarks: real head motion
 
-            # Fast-motion frames are stored as gaps (filled by interpolation), so a
-            # head turn doesn't poison the next 15 s of windows.
-            moving_now = big_move
-            if big_move:
-                buffer.add_unusable(now)
-            else:
-                buffer.add(now, colors, bg_rgb, pose)
+                # Fast-motion frames are stored as gaps (filled by interpolation), so a
+                # head turn doesn't poison the next 15 s of windows.
+                moving_now = big_move
+                if big_move:
+                    buffer.add_unusable(now)
+                else:
+                    buffer.add(now, colors, bg_rgb, pose)
 
             have = buffer.span()
             moving = now - last_motion < MOTION_HOLD
             if have < MIN_SEC:
                 lighting = assess_lighting(stats, fps)
                 reading = tracker.update(now)
-            elif now - last_update >= UPDATE_EVERY:
-                last_update = now
+            elif now - last_update >= UPDATE_EVERY and not analyzer.busy():   # one job at a time
                 lighting = assess_lighting(stats, fps)
                 # If the head moved at all during this window, make green prove itself (see vitals_dsp).
                 margin = 3.0 if now - last_small_motion < WINDOW_SEC else 0.0
-                times, traces, background = buffer.arrays()
-                analysis = analyze_heart_rate(
-                    times, traces, background, method=method, prev_bpm=reading.prior_bpm,
-                    use_background=use_background, green_margin_db=margin,
-                    pose=buffer.pose_array(), use_motion=use_motion)
-                reading = tracker.update(now, analysis and analysis["bpm"],
-                                         analysis and analysis["snr_db"], usable=not moving,
-                                         window_sec=have)
-                trend.append((now, reading.bpm))
+                times, traces, background = buffer.arrays()   # a copy: safe to hand to the worker
+                submitted = analyzer.submit(
+                    (now, have, moving),
+                    times=times, patch_traces=traces, background=background, method=method,
+                    prev_bpm=reading.prior_bpm, use_background=use_background,
+                    green_margin_db=margin, pose=buffer.pose_array(), use_motion=use_motion)
+                if submitted:
+                    last_update = now
 
             if show_map:
-                patch_snr = analysis["patch_snr"] if analysis else {}
-                frame = draw_overlay(frame, regions, patches, patch_snr, bg_boxes)
+                with timer.stage("draw"):
+                    patch_snr = analysis["patch_snr"] if analysis else {}
+                    frame = draw_overlay(frame, regions, patches, patch_snr, bg_boxes)
 
             if have < MIN_SEC:
                 status = f"Hold still... collecting {have:.0f}/{MIN_SEC} s"
@@ -255,6 +290,7 @@ def main():
                 smooth_lm = None
                 status = "No face detected"
 
+        draw_start = time.perf_counter()
         frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)   # display size
 
         while trend and now - trend[0][0] > 60:
@@ -283,8 +319,11 @@ def main():
             "power": analysis["power"] if analysis else None,
             "pulse": analysis["pulse"] if analysis else None,
             "peak_bpm": analysis["bpm"] if analysis else None,
+            "perf": perf_line(timer, fps, analyzer.background) if show_perf else None,
         }
         cv2.imshow(WINDOW, compose(frame, info, theme="light" if light_mode else "dark"))
+        timer.add("ui", (time.perf_counter() - draw_start) * 1000)
+        timer.add("work", (time.perf_counter() - work_start) * 1000)
 
         if rec_writer is not None:
             # Every frame is written, including frames with no face (empty colours),
@@ -305,10 +344,12 @@ def main():
         elif key == ord("m"):
             method_idx = (method_idx + 1) % len(METHODS)
             tracker.reset()
+            analyzer.invalidate()
             print("method:", METHODS[method_idx])
         elif key == ord("b"):
             use_background = not use_background
             tracker.reset()
+            analyzer.invalidate()
             print("background cancellation:", use_background)
         elif key == ord("l"):
             light_mode = not light_mode
@@ -319,6 +360,8 @@ def main():
             print("light mode:", light_mode)
         elif key == ord("r"):
             show_map = not show_map
+        elif key == ord("p"):
+            show_perf = not show_perf
         elif key == ord("s"):
             if rec_writer is None:
                 rec_file, rec_writer = start_recording()
@@ -329,6 +372,7 @@ def main():
 
     if rec_file:
         rec_file.close()
+    analyzer.close()
     cap.release()
     cv2.destroyAllWindows()
 
