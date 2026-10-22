@@ -128,3 +128,24 @@ def test_pose_with_missing_frames_is_handled():
     pose[50:60] = np.nan
     r = analyze_heart_rate(t, patches, bg, pose=pose)
     assert abs(r["bpm"] - truth) < 3 and r["motion_patches"] == 0
+
+
+# ---------------- CHROM and method agreement ----------------
+
+def test_chrom_finds_pulse_and_ignores_brightness():
+    from vitals_dsp import chrom_pulse
+    t = np.arange(0, 15, 1 / FS)
+    pulse = 0.002 * np.sin(2 * np.pi * 1.3 * t)
+    flicker = 1 + 0.01 * np.sin(2 * np.pi * 2.2 * t)                 # brightness only
+    direction = np.array([0.33, 0.77, 0.53])
+    rgb = np.array([180.0, 130.0, 110.0]) * flicker[:, None] * (1 + pulse[:, None] * direction / 0.77)
+    f, p = power_spectrum(bandpass(chrom_pulse(rgb), HR_LOW, HR_HIGH))
+    assert abs(pick_peak(f, p, HR_LOW, HR_HIGH) - 1.3) < 0.05
+
+
+def test_agreement_reported_and_high_on_clean_data():
+    rng = np.random.default_rng(9)
+    t, patches, bg, truth = make_trial("steady light", "lighter", rng)
+    r = analyze_heart_rate(t, patches, bg, patch_map=False)
+    assert set(r["method_bpm"]) == {"pos", "chrom", "green"}
+    assert r["agreement"] == 3

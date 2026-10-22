@@ -31,6 +31,11 @@ import numpy as np
 
 from vitals_dsp import analyze_heart_rate
 
+# Per-frame signals from FaceMesh used for motion correction (see vitals_dsp.remove_nuisance):
+# where the head is (x, y), how close (scale), its tilt (roll), and how open the mouth is
+# (mouth: talking moves the cheeks in a 1-4 Hz rhythm, right in the heart-rate band).
+POSE_FIELDS = ("x", "y", "scale", "roll", "mouth")
+
 
 # --------------------------------------------------------------------------
 # Rolling sample buffer
@@ -61,14 +66,14 @@ class SampleBuffer:
         self.last_face_time = None
 
     def add(self, t, colors, background_rgb, pose=None):
-        """One frame with a face. colors: {patch: RGB or None}; pose: 4 head-pose numbers or None."""
+        """One frame with a face. colors: {patch: RGB or None}; pose: POSE_FIELDS values or None."""
         missing = np.full(3, np.nan)
         self.times.append(t)
         for n in self.patch_names:
             c = colors.get(n)
             self.traces[n].append(missing if c is None else np.asarray(c, dtype=float))
         self.background.append(missing if background_rgb is None else np.asarray(background_rgb, dtype=float))
-        self.pose.append(np.full(4, np.nan) if pose is None else np.asarray(pose, dtype=float))
+        self.pose.append(None if pose is None else np.asarray(pose, dtype=float))   # None = no pose this frame
         self.last_face_time = t
         self._trim(t)
 
@@ -111,9 +116,15 @@ class SampleBuffer:
                 np.array(self.background))
 
     def pose_array(self):
-        """(N, 4) head pose, or None if no frame in the window had one."""
-        p = np.array(self.pose)
-        return None if len(p) == 0 or np.isnan(p).all() else p
+        """(N, len(POSE_FIELDS)) head pose, or None if no frame in the window had one."""
+        # Width comes from the poses actually stored (older recordings have 4, newer 5),
+        # so frames without a pose become NaN rows of the same width.
+        width = next((len(p) for p in self.pose if p is not None), None)
+        if width is None:
+            return None
+        empty = np.full(width, np.nan)
+        p = np.array([empty if x is None else x for x in self.pose])
+        return None if np.isnan(p).all() else p
 
 
 # --------------------------------------------------------------------------
@@ -168,7 +179,14 @@ class HeartRateTracker:
        a little genuinely new data; session_benchmark.py showed the 0.5 s
        version letting a noise peak through on dim, darker-skin sessions.
 
-    6. Start early, but with a stricter bar.
+    6. Methods must agree.
+       analyze_heart_rate also finds the peak with POS, CHROM and green
+       separately. If no second method agrees (within 5 BPM), the estimate is
+       ignored, like a window with motion. Measured on the synthetic scenarios:
+       windows that passed the SNR bar but had only 1/3 agreement were more
+       than 10 BPM wrong 67% of the time; with 2/3 or 3/3, essentially never.
+
+    7. Start early, but with a stricter bar.
        The app starts analysing after 5 s instead of waiting for a full 15 s
        window. A short window has coarser frequency resolution, and pure noise
        reaches a given SNR more easily (measured: at 5 s, noise passes 0 dB
@@ -192,6 +210,7 @@ class HeartRateTracker:
     HOLD_SEC = 3.0       # show a held value at most this long
     PRIOR_SEC = 10.0     # keep favouring the old track this long after the last accept
     SMOOTH_N = 5         # median of this many accepted estimates
+    MIN_AGREEMENT = 2             # of 3 methods (POS, CHROM, green) must agree on the peak
     SHORT_WINDOW_EXTRA_DB = 1.0   # extra SNR needed for the shortest (5 s) windows
     SHORT_WINDOW_SEC = 5.0        # window length that gets the full extra
     FULL_BAR_SEC = 8.0            # from this window length on, no extra
@@ -248,13 +267,16 @@ class HeartRateTracker:
         frac = np.clip((self.FULL_BAR_SEC - window_sec) / span, 0.0, 1.0)
         return float(self.SHORT_WINDOW_EXTRA_DB * frac)
 
-    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None):
+    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None, agreement=None):
         """
         One new window. bpm/snr_db from analyze_heart_rate (None if no face
         data); usable=False when the head moved (estimate not trusted);
-        window_sec = how many seconds of data the estimate used.
+        window_sec = how many seconds of data the estimate used;
+        agreement = how many of the 3 methods agree with bpm (None = unknown).
         """
         self.last_snr = snr_db
+        if agreement is not None and agreement < self.MIN_AGREEMENT:
+            usable = False                      # one method alone: not trusted
         has_track = self.track is not None and now - self.last_accept <= self.HOLD_SEC
         if snr_db is not None:
             snr_db = snr_db - self.extra_db(window_sec)   # short window: same rules, higher bar
@@ -314,7 +336,7 @@ class LegacyDisplay:
         self.history.clear()
         self.bpm = None
 
-    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None):
+    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None, agreement=None):
         if bpm is None or snr_db is None or not usable or snr_db < self.snr_min_db:
             self.reset()
             return Reading(None, "lost", snr_db, None)
@@ -338,7 +360,7 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
     sessions), so both measure the logic the app actually runs.
       face:   (N,) bool, False = FaceMesh found no face in that frame
       moving: (N,) bool, True = fast head motion in that frame
-      pose:   (N, 4) head pose per frame, or None (no motion correction)
+      pose:   (N, K) head pose per frame (POSE_FIELDS), or None (no motion correction)
     """
     names = list(patches)
     buf = SampleBuffer(names, window_sec, max_gap_sec)
@@ -366,7 +388,8 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
             r = analyze_heart_rate(t, traces, None if background is None else bg, method=method,
                                    prev_bpm=prior, patch_map=False, pose=buf.pose_array())
             reading = display.update(now, r and r["bpm"], r and r["snr_db"],
-                                     usable=now - last_motion >= motion_hold, window_sec=buf.span())
+                                     usable=now - last_motion >= motion_hold, window_sec=buf.span(),
+                                     agreement=r and r.get("agreement"))
         prior = reading.prior_bpm
         out.append((float(now), reading.bpm, reading.state))
     return out

@@ -38,11 +38,11 @@ import numpy as np
 
 from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
-from face_regions import (PATCHES, REGIONS, assess_lighting, background_color, draw_overlay,
-                          extract_patch_colors, landmarks_to_array, patch_region)
+from face_regions import PATCHES, REGIONS, assess_lighting, draw_overlay, patch_region
+from frame_features import MOTION_LIMIT, SMALL_MOTION, FeatureExtractor
 from liveness import CHALLENGE_SEC, LivenessSession
 from vitals_dsp import analyze_heart_rate
-from vitals_stream import HeartRateTracker, SampleBuffer
+from vitals_stream import POSE_FIELDS, HeartRateTracker, SampleBuffer
 
 # ---------------- Settings you can tune ----------------
 WINDOW_SEC = 15          # seconds of history per estimate (15 s -> ~4 BPM frequency resolution)
@@ -50,10 +50,8 @@ MIN_SEC = 5              # first estimate after 5 s (the tracker asks more of sh
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
 FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
-MOTION_LIMIT = 0.025     # nose movement per frame (fraction of face width) that pauses readings
-SMALL_MOTION = 0.008     # smaller movement: no pause, but auto mode then prefers POS
+TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than this over 1 s = talking
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
-SMOOTHING = 0.5          # landmark smoothing 0..1 (higher = steadier patches, more lag)
 FRAME_WIDTH = 640        # FaceMesh and the dashboard use a copy this wide (keeps them fast)
 WINDOW = "Vitals from Video"
 METHODS = ["auto", "pos", "green"]
@@ -76,17 +74,6 @@ def open_camera(width, height):
     got = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
     print(f"camera: asked for {width}x{height}, got {got[0]}x{got[1]}")
     return cap
-
-
-def head_pose(lm, w, h):
-    """
-    Four numbers describing where the head is, for motion correction:
-    nose x, nose y, face width (moving closer/further) and roll (tilt), all
-    relative to the frame so they don't depend on the resolution.
-    """
-    left_eye, right_eye = lm[33], lm[263]
-    roll = math.atan2(right_eye[1] - left_eye[1], right_eye[0] - left_eye[0])
-    return np.array([lm[1][0] / w, lm[1][1] / h, np.linalg.norm(lm[234] - lm[454]) / w, roll])
 
 
 def set_window_mode(light):
@@ -115,8 +102,8 @@ def start_recording():
     for name in PATCHES + ["background"]:
         header += [f"{name}_r", f"{name}_g", f"{name}_b"]
     # face/moving/state let replay.py reproduce exactly what the screen did.
-    writer.writerow(header + ["bpm_shown", "snr_db", "method_used", "light_mode", "face", "moving", "state",
-                              "pose_x", "pose_y", "pose_scale", "pose_roll", "frame_w", "frame_h"])
+    writer.writerow(header + ["bpm_shown", "snr_db", "method_used", "light_mode", "face", "moving", "state"]
+                    + [f"pose_{k}" for k in POSE_FIELDS] + ["frame_w", "frame_h"])
     print("recording to", path)
     return f, writer
 
@@ -170,7 +157,9 @@ def main():
     tracker = HeartRateTracker()                               # decides what number to show
     reading = tracker.reading(0.0)
     trend = deque()                                  # (time, bpm or None) for the 60 s trend
-    analysis, smooth_lm, prev_nose = None, None, None
+    analysis = None
+    features = FeatureExtractor()                    # per-frame skin colours, wall, head pose, motion
+    talking_level = deque(maxlen=30)                 # mouth opening over the last ~1 s
     method_idx, use_background, light_mode, show_map, show_perf = 0, True, False, True, True
     lighting = ("none", "Light: waiting for face")
     last_update, last_motion, last_small_motion = 0.0, -99.0, -99.0
@@ -217,32 +206,23 @@ def main():
             timer.add("analysis", analysis_ms)
             reading = tracker.update(snap_time, analysis and analysis["bpm"],
                                      analysis and analysis["snr_db"], usable=not snap_moving,
-                                     window_sec=snap_span)
+                                     window_sec=snap_span, agreement=analysis and analysis["agreement"])
             trend.append((snap_time, reading.bpm))
         status, colors, bg_rgb, moving_now, pose = "", None, None, False, None
         method = METHODS[method_idx]
 
         if result.multi_face_landmarks:
-            lm = landmarks_to_array(result.multi_face_landmarks[0], w, h)
-
-            # Motion check: head movement corrupts the signal far more than a pulse changes it.
-            face_width = np.linalg.norm(lm[234] - lm[454])
-            movement = 0.0 if prev_nose is None else np.linalg.norm(lm[1] - prev_nose) / face_width
-            if movement > MOTION_LIMIT:
-                last_motion = now
-            if movement > SMALL_MOTION:
-                last_small_motion = now
-            prev_nose = lm[1].copy()
-
-            # Landmark smoothing: FaceMesh points jitter a pixel or two per frame, making patch
-            # edges flicker on/off skin. Average with the previous frame unless the head really moved.
-            big_move = movement > MOTION_LIMIT
-            smooth_lm = lm if smooth_lm is None or big_move else SMOOTHING * smooth_lm + (1 - SMOOTHING) * lm
-
             with timer.stage("patches"):
-                colors, patches, regions, stats = extract_patch_colors(frame, smooth_lm)
-                bg_rgb, bg_boxes = background_color(frame, smooth_lm)
-                pose = head_pose(lm, w, h)                 # raw (unsmoothed) landmarks: real head motion
+                ff = features.process(frame, result.multi_face_landmarks[0])
+                colors, bg_rgb, pose = ff.colors, ff.bg_rgb, ff.pose
+                patches, regions = ff.overlay["patches"], ff.overlay["regions"]
+                bg_boxes, stats = ff.overlay["bg_boxes"], ff.overlay["stats"]
+                big_move = ff.fast_motion
+                if ff.fast_motion:
+                    last_motion = now
+                if ff.small_motion:
+                    last_small_motion = now
+                talking_level.append(pose[4])
 
                 # Fast-motion frames are stored as gaps (filled by interpolation), so a
                 # head turn doesn't poison the next 15 s of windows.
@@ -283,21 +263,23 @@ def main():
                 status = f"Hold still... collecting {have:.0f}/{MIN_SEC} s"
             elif moving:
                 status = "Movement detected - hold still"
+            elif len(talking_level) > 10 and np.std(talking_level) > TALKING_STD:
+                status = "Talking detected - stay quiet for the best reading"
             elif reading.state == "holding":
                 status = "Weak signal - holding last reading"
             elif reading.bpm is None:
                 status = lighting[1] if lighting[0] != "good" else "Weak signal - keep still"
         elif liveness is not None:
-            prev_nose = None
+            features.process(frame, None)
         else:
             # Brief loss (blink, hand passing): keep the data and ride it out.
-            prev_nose = None
+            features.process(frame, None)
             if buffer.add_missing(now):
                 status = "Face lost - hold still"
                 reading = tracker.reading(now)
             else:
                 reset_all()
-                smooth_lm = None
+                features.reset()
                 status = "No face detected"
 
         draw_start = time.perf_counter()
@@ -346,11 +328,14 @@ def main():
         elif reading.state == "holding":
             level = "fair"
         else:
-            level = "good" if snr is not None and snr >= SNR_GOOD_DB else "fair"
+            # "Good" needs a clean spectrum AND all three methods agreeing.
+            agree = analysis["agreement"] if analysis else 0
+            level = "good" if snr is not None and snr >= SNR_GOOD_DB and agree == 3 else "fair"
         info = {
             "bpm": bpm, "snr_db": snr, "fps": fps, "status": status, "now": now,
             "level": level, "state": reading.state,
-            "method_label": f"AUTO>{used.upper()}" if method == "auto" else method.upper(),
+            "method_label": (f"AUTO>{used.upper()}" if method == "auto" else method.upper())
+                            + (f"  {analysis['agreement']}/3 agree" if analysis else ""),
             "method_used": used, "lighting": lighting,
             "features": (f"bg {'ON' if use_background else 'OFF'}  "
                          + (f"motion {analysis['motion_patches']}/{len(PATCHES)}"
@@ -377,7 +362,7 @@ def main():
                 row += [f"{v:.4f}" for v in c] if c is not None else ["", "", ""]
             row += [f"{bpm:.1f}" if bpm is not None else "", f"{snr:.2f}" if snr is not None else "",
                     used, int(light_mode), int(colors is not None), int(moving_now), reading.state]
-            row += [f"{v:.6f}" for v in pose] if pose is not None else ["", "", "", ""]
+            row += [f"{v:.6f}" for v in pose] if pose is not None else [""] * len(POSE_FIELDS)
             row += [w, h]
             rec_writer.writerow(row)
 
