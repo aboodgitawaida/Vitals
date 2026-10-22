@@ -31,6 +31,7 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | `vitals_stream.py` | Rolling buffer and display tracker, shared by app, replay and benchmarks |
 | `face_regions.py` | Skin regions, patch grid, skin filter, background boxes, lighting coach |
 | `dashboard.py` | OpenCV UI, dark and light themes |
+| `perf.py` | Stage timer and background analysis process (keeps the camera loop smooth) |
 | `replay.py` | Re-runs every configuration on a recording against a reference BPM |
 | `synthetic_benchmark.py` | Per-window ablation on simulated lighting scenarios |
 | `session_benchmark.py` | End-to-end test of what the screen shows on simulated 2-minute sessions |
@@ -46,11 +47,12 @@ python vitals_app.py
 ```
 
 Options: `--res 640x480` (old resolution, to A/B against the default 1280x720),
-`--no-motion-correction`.
+`--no-motion-correction`, `--no-background` (run the analysis inline instead of in
+a background process, to compare speed).
 
 Keys: `q` quit, `m` method (auto / pos / green), `b` background cancellation,
 `l` light mode (white full-screen so the screen lights your face), `r` patch SNR
-map, `s` start/stop recording (average colours per frame only, never images).
+map, `p` performance readout, `s` start/stop recording (average colours per frame only, never images).
 
 ```zsh
 python replay.py recordings/session_YYYYMMDD_HHMMSS.csv --ref 72   # 72 = your watch's BPM
