@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vitals from Video</title>
+  <meta name="description" content="Camera-based heart-rate estimation (rPPG) that runs entirely in your browser. Not a medical device.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 28s-11-7-11-15a6 6 0 0 1 11-3 6 6 0 0 1 11 3c0 8-11 15-11 15z' fill='%23e5484d'/></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Vitals from Video</h1>
+    <p class="tagline">Heart-rate <em>estimation</em> from your webcam. Not a medical device.</p>
+  </header>
+
+  <section id="intro" class="card">
+    <h2>How it works</h2>
+    <p>Each heartbeat changes your skin's colour very slightly. The page measures 16 small skin
+       patches on your forehead and cheeks, removes what room light and head movement explain,
+       and finds the rhythm in the last 15 seconds.</p>
+    <p><strong>Everything runs in this browser tab.</strong> No video, image or measurement is
+       uploaded or saved. The page only downloads its code and the face-tracking model.</p>
+    <ul>
+      <li>Sit still, face the camera, in good, even light (a window or lamp in front of you).</li>
+      <li>The first number appears after about 5 seconds; it describes roughly the last 15.</li>
+      <li>Not for health, stress or diagnostic use. Accuracy has only been tested on simulated data.</li>
+    </ul>
+    <button id="start" class="primary">Start camera</button>
+    <p id="load-status" class="muted" role="status" aria-live="polite"></p>
+  </section>
+
+  <main id="app" hidden>
+    <div class="video-wrap">
+      <canvas id="view" aria-label="Camera view with measured skin patches"></canvas>
+      <div id="perf" class="perf"></div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </div>
+
+    <aside class="side">
+      <section class="panel hr">
+        <div class="label">HEART RATE</div>
+        <div class="value"><span id="bpm">--</span><span class="unit">BPM</span></div>
+        <div class="level"><span class="dot"></span><span id="level-text">NO READING</span></div>
+        <div id="details" class="muted small"></div>
+        <div id="lighting" class="small"></div>
+      </section>
+
+      <section class="panel">
+        <div class="label row">REGIONS <span class="muted">SNR | weight</span><span id="features" class="muted right"></span></div>
+        <div id="regions"></div>
+      </section>
+
+      <section class="panel">
+        <div class="label">PULSE SPECTRUM</div>
+        <canvas id="spectrum" class="chart"></canvas>
+      </section>
+    </aside>
+
+    <section class="panel wide">
+      <div class="label">PULSE WAVEFORM</div>
+      <canvas id="pulse" class="chart"></canvas>
+    </section>
+    <section class="panel wide">
+      <div class="label">HEART RATE TREND (60 s)</div>
+      <canvas id="trend" class="chart"></canvas>
+    </section>
+
+    <nav class="controls" aria-label="Controls">
+      <div class="seg" role="group" aria-label="Method">
+        <button data-method="auto" aria-pressed="true">Auto</button>
+        <button data-method="pos" aria-pressed="false">POS</button>
+        <button data-method="green" aria-pressed="false">Green</button>
+      </div>
+      <button id="bg-toggle" aria-pressed="true" title="Cancel room-light changes using the wall (B)">Background: on</button>
+      <button id="light-toggle" aria-pressed="false" title="White full screen, so your screen lights your face (L)">Light mode</button>
+      <button id="map-toggle" aria-pressed="true" title="Show/hide the patch SNR map (R)">SNR map</button>
+      <button id="stop">Stop</button>
+      <span class="muted small keys">Keys: M method · B background · L light · R map · P performance</span>
+    </nav>
+  </main>
+
+  <footer class="muted small">
+    Research and learning project. Darker skin and dim light give weaker signals; the page shows
+    "--" rather than guess. <a href="https://github.com/aboodgitawaida/Vitals">Source code</a>
+  </footer>
+</body>
+</html>

@@ -20,3 +20,5 @@ jobs:
         run: python -m py_compile *.py
       - name: Unit and end-to-end tests
         run: python -m pytest -q tests
+      - name: Web version builds
+        run: node web/build.mjs && node --check dist/app.js && node --check dist/worker.js
