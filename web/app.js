@@ -96,30 +96,63 @@ async function startCamera() {
 
 function setLoad(text) { $("load-status").textContent = text; }
 
+// Face tracking and Python start downloading as soon as the page opens, while the
+// visitor reads the intro; the camera is only switched on when they click Start.
+let loading = null;
+function preload() {
+  if (!loading) {
+    loading = { lm: startLandmarker(), py: startWorker() };
+    Promise.all([loading.lm, loading.py]).then(
+      () => { if (!state.running && !state.starting) setLoad("Ready."); },
+      () => {});                                     // failures are reported when Start is clicked
+  }
+  return loading;
+}
+
+function discardPreload() {
+  // Something failed to load: release what did load, so the next Start loads afresh.
+  const old = loading;
+  loading = null;
+  old?.lm.then((r) => r.landmarker.close(), () => {});
+  old?.py.then((r) => r.worker.terminate(), () => {});
+}
+
 async function start() {
   const btn = $("start");
   btn.disabled = true;
-  setLoad("Starting camera…");
+  state.starting = true;
   if (!navigator.mediaDevices?.getUserMedia) {
     setLoad("This browser cannot use the camera here (the page needs HTTPS).");
     btn.disabled = false;
+    state.starting = false;
     return;
   }
-  // Load all three at once; if any fails, release the ones that worked (the camera light goes off).
-  const [cam, lm, py] = await Promise.allSettled([startCamera(), startLandmarker(), startWorker()]);
-  if (cam.status === "fulfilled") Object.assign(state, cam.value);
-  if (lm.status === "fulfilled") Object.assign(state, lm.value);
-  if (py.status === "fulfilled") Object.assign(state, py.value);
-  const failed = [cam, lm, py].find((r) => r.status === "rejected");
-  if (failed) {
-    const err = failed.reason;
+  const { lm: lmLoad, py: pyLoad } = preload();
+  const cam = await startCamera().then((value) => ({ value }), (reason) => ({ reason }));
+  if (cam.reason) {
+    // Keep the preloaded face tracking and Python: only the camera needs another try.
+    const err = cam.reason;
     console.error(err);
-    stop();
     const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
     setLoad(denied ? "Camera permission was denied. Allow camera access for this site and try again."
-                   : `Could not start: ${err?.message || err}`);
+                   : `Could not start the camera: ${err?.message || err}`);
+    btn.disabled = false;
+    state.starting = false;
     return;
   }
+  Object.assign(state, cam.value);
+  setLoad("Camera on. Finishing loading…");
+  const [lm, py] = await Promise.allSettled([lmLoad, pyLoad]);
+  state.starting = false;
+  if (lm.status === "rejected" || py.status === "rejected") {
+    const err = (lm.status === "rejected" ? lm : py).reason;
+    console.error(err);
+    discardPreload();
+    stop();
+    setLoad(`Could not start: ${err?.message || err}`);
+    return;
+  }
+  Object.assign(state, lm.value, py.value);
   state.extractor = new FeatureExtractor(state.cfg);
   const w = state.video.videoWidth, h = state.video.videoHeight;
   state.grab = document.createElement("canvas");
@@ -137,10 +170,14 @@ async function start() {
 }
 
 function stop() {
+  const wasRunning = state.running;
   state.running = false;
   state.stream?.getTracks().forEach((t) => t.stop());
-  state.worker?.terminate();
-  state.landmarker?.close();
+  if (wasRunning) {                     // these came from the preload: load fresh ones for next time
+    loading = null;
+    state.worker?.terminate();
+    state.landmarker?.close();
+  }
   Object.assign(state, {
     stream: null, worker: null, landmarker: null, cfg: null, pending: [], busy: false, info: null,
     lastFrame: null, lastPresented: null, fps: 0, camFps: 0, perf: {}, meshFrames: 0, switching: false,
@@ -151,6 +188,7 @@ function stop() {
   $("intro").hidden = false;
   $("start").disabled = false;
   setLoad("");
+  if (wasRunning) preload();             // so starting again is quick
 }
 
 // ---------------------------------------------------------------- per frame
@@ -490,3 +528,5 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "r") setMap(!state.showMap);
   else if (e.key === "p") state.showPerf = !state.showPerf;
 });
+
+preload();

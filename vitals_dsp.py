@@ -24,7 +24,10 @@ v3 PIPELINE
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
-from scipy.signal import butter, filtfilt, detrend
+try:
+    from scipy.signal import butter, filtfilt, detrend
+except ImportError:          # the browser version: numpy-only copies, ~14 MB less to download
+    from signal_lite import butter, filtfilt, detrend
 
 FS = 30.0                     # everything is resampled to 30 samples/second
 HR_LOW, HR_HIGH = 0.7, 4.0    # Hz. 42-240 BPM: the range a human heart rate can plausibly be in
