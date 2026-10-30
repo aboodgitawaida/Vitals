@@ -49,8 +49,9 @@ async function init() {
   postMessage({ type: "status", text: "Loading Python…" });
   const { loadPyodide } = await import(`${PYODIDE_URL}pyodide.mjs`);
   py = await loadPyodide({ indexURL: PYODIDE_URL });
-  postMessage({ type: "status", text: "Loading numpy and scipy…" });
-  await py.loadPackage(["numpy", "scipy"]);
+  postMessage({ type: "status", text: "Loading numpy…" });
+  // No scipy: vitals_dsp falls back to signal_lite.py (numpy only), ~14 MB less to download.
+  await py.loadPackage(["numpy"]);
   postMessage({ type: "status", text: "Loading the signal processing…" });
   // The project's own .py files, copied next to this page by build.mjs.
   const files = await (await fetch("py/manifest.json")).json();

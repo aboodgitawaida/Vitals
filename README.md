@@ -31,6 +31,7 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | --- | --- |
 | `vitals_app.py` | Live app: camera, FaceMesh, dashboard, recording |
 | `live_session.py` | The live app's heart-rate logic without camera or UI (shared with the web version) |
+| `signal_lite.py` | numpy-only butter / filtfilt / detrend, so the browser needn't download scipy |
 | `face_layout.py` | Face regions, patch grid, thresholds, lighting coach (no OpenCV, so the browser can use it) |
 | `web/` | Browser version (Vercel): camera + MediaPipe in JS, the Python analysis via Pyodide |
 | `vitals_dsp.py` | All signal processing (no camera code, fully testable) |
@@ -82,7 +83,10 @@ skin-patch colours run in JavaScript; the analysis is **this repo's Python**
 (`live_session.py`, `vitals_dsp.py`, `vitals_stream.py`, `face_layout.py`),
 run unchanged in a Web Worker with [Pyodide](https://pyodide.org). Video never
 leaves the browser; the page only downloads its code and the face model
-(~25 MB the first time, cached after).
+(~16 MB the first time, cached after; it starts while you read the intro).
+scipy is not loaded in the browser: `vitals_dsp` falls back to
+`signal_lite.py`, numpy copies of the three scipy functions it uses
+(checked against scipy by `tests/test_signal_lite.py`).
 
 ```zsh
 node web/build.mjs                         # assembles dist/ (page + the .py files it needs)
