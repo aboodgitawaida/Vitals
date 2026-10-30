@@ -30,6 +30,9 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | File | What it does |
 | --- | --- |
 | `vitals_app.py` | Live app: camera, FaceMesh, dashboard, recording |
+| `live_session.py` | The live app's heart-rate logic without camera or UI (shared with the web version) |
+| `face_layout.py` | Face regions, patch grid, thresholds, lighting coach (no OpenCV, so the browser can use it) |
+| `web/` | Browser version (Vercel): camera + MediaPipe in JS, the Python analysis via Pyodide |
 | `vitals_dsp.py` | All signal processing (no camera code, fully testable) |
 | `frame_features.py` | Per-frame skin colours, wall, head pose and motion, shared by the app and the video tools |
 | `evaluate_video.py` | Accuracy on videos with a reference (UBFC-rPPG dataset, test videos, your own clips) |
@@ -70,6 +73,31 @@ python session_benchmark.py --vanish     # does the number disappear when the pu
 python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
 pip install pytest && python -m pytest -q tests
 ```
+
+## Run it in the browser (web version)
+
+`web/` is a browser version that runs on any static host (it is set up for
+Vercel). The camera, face tracking (MediaPipe FaceLandmarker) and the
+skin-patch colours run in JavaScript; the analysis is **this repo's Python**
+(`live_session.py`, `vitals_dsp.py`, `vitals_stream.py`, `face_layout.py`),
+run unchanged in a Web Worker with [Pyodide](https://pyodide.org). Video never
+leaves the browser; the page only downloads its code and the face model
+(~25 MB the first time, cached after).
+
+```zsh
+node web/build.mjs                         # assembles dist/ (page + the .py files it needs)
+cd dist && python -m http.server 8000      # open http://localhost:8000
+```
+
+**Deploy to Vercel:** import the GitHub repo at vercel.com/new and click
+Deploy. `vercel.json` already sets the build (`node web/build.mjs`) and the
+output folder (`dist`), so there is nothing to configure. Or from a terminal:
+`npx vercel` (preview) and `npx vercel --prod`.
+
+Same keys as the desktop app (M, B, L, R, P). Not in the web version yet:
+the liveness check and recording. `tests/test_web_features.py` checks the
+JavaScript colour measurement against the Python one (needs Node), and
+`tests/test_live_session.py` the app logic the browser runs.
 
 ## Validation
 
