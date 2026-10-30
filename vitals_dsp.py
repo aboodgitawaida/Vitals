@@ -451,22 +451,3 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         "method_bpm": method_bpm,            # each method's own peak (cross-check)
         "agreement": agreement,              # how many of POS / CHROM / green agree with "bpm" (1-3)
     }
-
-
-# --------------------------------------------------------------------------
-# v1 helper, kept so vitals_phase1.py still runs as a baseline.
-# Phase 2 (breathing) will reuse this with a 0.1-0.5 Hz band.
-# --------------------------------------------------------------------------
-
-def estimate_rate(times, values, low_hz, high_hz, fs=FS, order=3):
-    """Single 1-D signal -> (rate per minute, quality 0..1, filtered signal)."""
-    _, v_u = resample_uniform(times, values, fs)
-    filtered = bandpass(detrend(v_u), low_hz, high_hz, fs, order)
-    freqs, power = power_spectrum(filtered, fs)
-    f0 = pick_peak(freqs, power, low_hz, high_hz)
-    band = (freqs >= low_hz) & (freqs <= high_hz)
-    f_band, p_band = freqs[band], power[band]
-    near = np.abs(f_band - f0) < 0.15
-    if 2 * f0 <= high_hz:
-        near |= np.abs(f_band - 2 * f0) < 0.15
-    return f0 * 60.0, float(p_band[near].sum() / p_band.sum()), filtered
