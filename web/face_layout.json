@@ -1,0 +1,80 @@
+{
+ "REGIONS": {
+  "forehead": [
+   10,
+   338,
+   297,
+   332,
+   334,
+   296,
+   336,
+   9,
+   107,
+   66,
+   105,
+   103,
+   67,
+   109
+  ],
+  "left cheek": [
+   50,
+   101,
+   118,
+   117,
+   116,
+   123,
+   187,
+   205,
+   36
+  ],
+  "right cheek": [
+   280,
+   330,
+   347,
+   346,
+   345,
+   352,
+   411,
+   425,
+   266
+  ]
+ },
+ "GRID": {
+  "forehead": [
+   4,
+   2
+  ],
+  "left cheek": [
+   2,
+   2
+  ],
+  "right cheek": [
+   2,
+   2
+  ]
+ },
+ "PATCHES": [
+  "forehead_p0",
+  "forehead_p1",
+  "forehead_p2",
+  "forehead_p3",
+  "forehead_p4",
+  "forehead_p5",
+  "forehead_p6",
+  "forehead_p7",
+  "left_cheek_p0",
+  "left_cheek_p1",
+  "left_cheek_p2",
+  "left_cheek_p3",
+  "right_cheek_p0",
+  "right_cheek_p1",
+  "right_cheek_p2",
+  "right_cheek_p3"
+ ],
+ "MIN_PATCH_PIXELS": 25,
+ "DARK_FRACTION": 0.6,
+ "CLIP_LEVEL": 250,
+ "MOTION_LIMIT": 0.025,
+ "SMALL_MOTION": 0.008,
+ "SMOOTHING": 0.5
+}

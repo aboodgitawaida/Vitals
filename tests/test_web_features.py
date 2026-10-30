@@ -15,11 +15,9 @@ from face_layout import PATCHES
 from frame_features import FeatureExtractor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="needs Node.js")
+needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="needs Node.js")
 
-CFG = {k: getattr(face_layout, k) for k in
-       ("REGIONS", "GRID", "MIN_PATCH_PIXELS", "DARK_FRACTION", "CLIP_LEVEL",
-        "MOTION_LIMIT", "SMALL_MOTION", "SMOOTHING")}
+CFG = face_layout.layout_config()
 
 
 def make_frame(rng, w=640, h=360):
@@ -60,6 +58,7 @@ def run_py(frames):
     return out
 
 
+@needs_node
 def test_js_features_match_python():
     rng = np.random.default_rng(0)
     frames = []
@@ -99,3 +98,10 @@ def test_js_features_match_python():
             assert j["stats"]["luminance"][region] == pytest.approx(lum, abs=0.3)
         assert j["stats"]["clipped_fraction"] == pytest.approx(p.overlay["stats"]["clipped_fraction"], abs=0.01)
     assert compared > 50
+
+
+def test_layout_json_matches_face_layout():
+    """web/face_layout.json is generated from face_layout.py; regenerate it after changing a setting:
+    python face_layout.py > web/face_layout.json"""
+    with open(os.path.join(ROOT, "web", "face_layout.json")) as f:
+        assert json.load(f) == json.loads(json.dumps(face_layout.layout_config()))

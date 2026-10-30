@@ -6,6 +6,8 @@
 //
 // Frames are batched while the worker is busy (one analysis at a time, like the
 // desktop app's background process), so the camera view never waits for Python.
+// The camera and colour measurement start before Python has finished loading: the
+// first seconds of samples are queued and analysed as soon as it is ready.
 
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 import { FeatureExtractor } from "./features.js";
@@ -27,7 +29,7 @@ const state = {
   pending: [], busy: false, info: null, running: false,
   t0: 0, lastFrame: null, fps: 0, method: "auto", background: true, light: false, showMap: true,
   showPerf: false, perf: {}, delegate: null, switching: false, meshFrames: 0,
-  camFps: 0, lastPresented: null,
+  camFps: 0, lastPresented: null
 };
 
 // ---------------------------------------------------------------- startup
@@ -35,29 +37,50 @@ const state = {
 function startWorker() {
   return new Promise((resolve, reject) => {
     const w = new Worker("worker.js", { type: "module" });
+    let ready = false;
     w.onmessage = (e) => {
       const m = e.data;
-      if (m.type === "status") setLoad(m.text);
-      else if (m.type === "ready") resolve({ worker: w, cfg: m.cfg });
+      if (m.type === "status") { if (!state.running) setLoad(m.text); }
+      else if (m.type === "ready") { ready = true; resolve({ worker: w }); }
       else if (m.type === "info") onInfo(m);
-      else if (m.type === "error") { console.error(m.text); if (!state.cfg) reject(new Error(m.text)); else state.busy = false; }
+      else if (m.type === "error") { console.error(m.text); if (!ready) reject(new Error(m.text)); else state.busy = false; }
     };
     w.onerror = (e) => reject(new Error(e.message || "worker failed"));
     w.postMessage({ type: "init" });
   });
 }
 
-let fileset = null;
+let fileset = null, model = null;
 async function createLandmarker(delegate) {
+  // The model downloads at the same time as MediaPipe's engine, not after it.
+  model ??= fetch(MODEL_URL).then((r) => {
+    if (!r.ok) throw new Error("could not load the face model");
+    return r.arrayBuffer();
+  }).then((b) => new Uint8Array(b));
+  model.catch(() => { model = null; });          // a later Start retries the download
   fileset ??= await FilesetResolver.forVisionTasks(WASM_URL);
   return FaceLandmarker.createFromOptions(fileset, {
-    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    baseOptions: { modelAssetBuffer: await model, delegate },
     runningMode: "VIDEO", numFaces: 1,
     minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
   });
 }
 
+function softwareGraphics() {
+  // No real GPU (e.g. SwiftShader, llvmpipe): GPU face tracking would be ~10x slower than CPU.
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    if (!gl) return true;
+    const info = gl.getExtension("WEBGL_debug_renderer_info");
+    const renderer = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : "";
+    return /swiftshader|llvmpipe|softpipe|software|basic render/i.test(renderer);
+  } catch {
+    return false;
+  }
+}
+
 async function startLandmarker() {
+  if (softwareGraphics()) return { landmarker: await createLandmarker("CPU"), delegate: "CPU" };
   try {
     return { landmarker: await createLandmarker("GPU"), delegate: "GPU" };
   } catch (err) {
@@ -74,9 +97,9 @@ function maybeSwitchToCpu() {
   createLandmarker("CPU").then((lm) => {
     if (!state.running) { lm.close(); return; }
     const old = state.landmarker;
-    Object.assign(state, { landmarker: lm, delegate: "CPU", switching: false });
+    Object.assign(state, { landmarker: lm, delegate: "CPU", switching: false, ownLandmarker: true });
     delete state.perf.mesh;
-    old.close();
+    try { old.close(); } catch {}
   }).catch((err) => console.warn("CPU face tracking failed, staying on GPU", err));
 }
 
@@ -101,8 +124,17 @@ function setLoad(text) { $("load-status").textContent = text; }
 let loading = null;
 function preload() {
   if (!loading) {
-    loading = { lm: startLandmarker(), py: startWorker() };
-    Promise.all([loading.lm, loading.py]).then(
+    const lm = startLandmarker();
+    loading = {
+      lm,
+      // Face tracking first: measuring can start as soon as it is ready, and the first
+      // 5 s of collecting hide the rest of Python's loading time.
+      py: lm.then(startWorker, startWorker),
+      // Regions and thresholds (generated from face_layout.py), so measuring needn't wait for Python.
+      cfg: fetch("face_layout.json").then((r) => { if (!r.ok) throw new Error("could not load face_layout.json"); return r.json(); }),
+    };
+    loading.py.catch(() => {});
+    Promise.all([loading.lm, loading.py, loading.cfg]).then(
       () => { if (!state.running && !state.starting) setLoad("Ready."); },
       () => {});                                     // failures are reported when Start is clicked
   }
@@ -110,10 +142,10 @@ function preload() {
 }
 
 function discardPreload() {
-  // Something failed to load: release what did load, so the next Start loads afresh.
+  // Release what was loaded (or is still loading), so the next Start loads afresh.
   const old = loading;
   loading = null;
-  old?.lm.then((r) => r.landmarker.close(), () => {});
+  old?.lm.then((r) => { try { r.landmarker.close(); } catch {} }, () => {});
   old?.py.then((r) => r.worker.terminate(), () => {});
 }
 
@@ -127,7 +159,7 @@ async function start() {
     state.starting = false;
     return;
   }
-  const { lm: lmLoad, py: pyLoad } = preload();
+  const load = preload();
   const cam = await startCamera().then((value) => ({ value }), (reason) => ({ reason }));
   if (cam.reason) {
     // Keep the preloaded face tracking and Python: only the camera needs another try.
@@ -141,18 +173,30 @@ async function start() {
     return;
   }
   Object.assign(state, cam.value);
-  setLoad("Camera on. Finishing loading…");
-  const [lm, py] = await Promise.allSettled([lmLoad, pyLoad]);
+  setLoad("Camera on. Loading face tracking…");
+  // Python may still be loading: start measuring now, it catches up when ready.
+  const [lm, cfg] = await Promise.allSettled([load.lm, load.cfg]);
   state.starting = false;
-  if (lm.status === "rejected" || py.status === "rejected") {
-    const err = (lm.status === "rejected" ? lm : py).reason;
+  if (lm.status === "rejected" || cfg.status === "rejected") {
+    const err = (lm.status === "rejected" ? lm : cfg).reason;
     console.error(err);
     discardPreload();
     stop();
     setLoad(`Could not start: ${err?.message || err}`);
     return;
   }
-  Object.assign(state, lm.value, py.value);
+  Object.assign(state, lm.value, { cfg: cfg.value });
+  load.py.then(({ worker }) => {
+    if (loading !== load || !state.running) return;     // stopped meanwhile
+    state.worker = worker;
+    flush();                                            // everything measured so far
+  }, (err) => {
+    if (loading !== load) return;
+    console.error(err);
+    discardPreload();
+    stop();
+    setLoad(`Could not load the heart-rate analysis: ${err?.message || err}`);
+  });
   state.extractor = new FeatureExtractor(state.cfg);
   const w = state.video.videoWidth, h = state.video.videoHeight;
   state.grab = document.createElement("canvas");
@@ -174,13 +218,15 @@ function stop() {
   state.running = false;
   state.stream?.getTracks().forEach((t) => t.stop());
   if (wasRunning) {                     // these came from the preload: load fresh ones for next time
-    loading = null;
-    state.worker?.terminate();
-    state.landmarker?.close();
+    // The preloaded face tracker and worker are released through the preload (even if still
+    // loading); a CPU tracker created by maybeSwitchToCpu is ours to close.
+    if (state.ownLandmarker) { try { state.landmarker.close(); } catch {} }
+    discardPreload();
   }
   Object.assign(state, {
     stream: null, worker: null, landmarker: null, cfg: null, pending: [], busy: false, info: null,
     lastFrame: null, lastPresented: null, fps: 0, camFps: 0, perf: {}, meshFrames: 0, switching: false,
+    ownLandmarker: false,
   });
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   setLight(false, false);
@@ -247,6 +293,7 @@ function onFrame(_ts, video) {
     fps: state.lastPresented === null ? state.fps : state.camFps,
   });
   flush();
+  if (!state.worker) $("status").textContent = "Getting the heart-rate analysis ready… measuring already, hold still";
   drawView(ff);
   lap("draw");
   renderPerf();

@@ -70,3 +70,19 @@ def snr_level(snr):
     if snr is None:
         return "none"
     return "good" if snr >= 3 else "fair" if snr >= 0 else "none"
+
+
+def layout_config():
+    """The settings the browser's colour measurement needs (web/features.js), as plain data."""
+    keys = ("REGIONS", "GRID", "PATCHES", "MIN_PATCH_PIXELS", "DARK_FRACTION", "CLIP_LEVEL",
+            "MOTION_LIMIT", "SMALL_MOTION", "SMOOTHING")
+    return {k: globals()[k] for k in keys}
+
+
+if __name__ == "__main__":
+    # The web page reads these from web/face_layout.json, so it can start measuring before
+    # Python has loaded. After changing a setting above, regenerate it:
+    #   python face_layout.py > web/face_layout.json
+    # (tests/test_web_features.py fails if the two differ.)
+    import json
+    print(json.dumps(layout_config(), indent=1))
