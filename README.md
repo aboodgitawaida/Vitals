@@ -84,6 +84,11 @@ skin-patch colours run in JavaScript; the analysis is **this repo's Python**
 run unchanged in a Web Worker with [Pyodide](https://pyodide.org). Video never
 leaves the browser; the page only downloads its code and the face model
 (~16 MB the first time, cached after; it starts while you read the intro).
+Face tracking loads first and measuring starts right away; Python loads
+during the first 5 s of collecting and then analyses everything measured so
+far. `web/face_layout.json` (generated: `python face_layout.py >
+web/face_layout.json`) gives the page the face regions without waiting for
+Python.
 scipy is not loaded in the browser: `vitals_dsp` falls back to
 `signal_lite.py`, numpy copies of the three scipy functions it uses
 (checked against scipy by `tests/test_signal_lite.py`).
