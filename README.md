@@ -1,14 +1,78 @@
-# Vitals from Video
+<div align="center">
 
-Camera-based heart-rate **estimation** from an ordinary laptop webcam
-(remote photoplethysmography, rPPG). Everything runs locally on your machine;
-no video is saved or uploaded.
+# Vitals
+
+**Heart rate from an ordinary webcam, measured entirely in your browser.**
+
+[![Live demo](https://img.shields.io/badge/live_demo-vitals--track.vercel.app-3b82f6?style=flat-square)](https://vitals-track.vercel.app)
+[![tests](https://img.shields.io/github/actions/workflow/status/aboodgitawaida/Vitals/ci.yml?branch=main&label=tests&style=flat-square)](https://github.com/aboodgitawaida/Vitals/actions/workflows/ci.yml)
+![Python 3.11](https://img.shields.io/badge/python-3.11-3776ab?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](LICENSE)
+
+[**Try it live →**](https://vitals-track.vercel.app)
+
+<a href="https://vitals-track.vercel.app"><img src="web/og.png" alt="Vitals: heart rate from an ordinary webcam" width="720"></a>
+
+</div>
+
+Each heartbeat pushes blood into the skin and changes its colour very slightly,
+far too little to see. Vitals tracks your face, measures that colour in 16 skin
+patches, removes what room light and head movement explain, and recovers your
+pulse. This technique is called **remote photoplethysmography (rPPG)**.
+
+There are two front ends over one signal-processing core:
+
+* **Web app** ([vitals-track.vercel.app](https://vitals-track.vercel.app)):
+  face tracking in JavaScript, and the project's **own Python analysis running
+  unchanged in the browser** through Pyodide (WebAssembly). No server, no uploads.
+* **Desktop app** (`vitals_app.py`): OpenCV dashboard with recording, replay
+  and a liveness-check prototype.
 
 > Not a medical device. Not for health, stress or diagnostic use. Accuracy has
-> so far been tested only on simulated data; validation against a reference
-> device is Phase 4 of this project.
+> so far been tested on simulated data only (see [Validation](#validation)).
 
-## How it works
+## Highlights
+
+* **One Python codebase, two runtimes.** The analysis (`live_session.py`,
+  `vitals_dsp.py`, `vitals_stream.py`) runs natively on desktop and in a Web
+  Worker in the browser. A build step finds every module it imports and ships
+  only those. scipy is replaced in the browser by `signal_lite.py` (numpy-only
+  Butterworth, filtfilt and detrend, verified against scipy in tests), which
+  halves the download.
+* **Robust signal processing.** Per-patch nuisance regression removes room-light
+  flicker (using the background wall as a reference), head pose and mouth
+  movement. Patches are pooled by inverse noise variance, and three rPPG
+  methods (POS, CHROM, green) must agree before a number is trusted.
+* **Honest by design.** A tracker (acquiring / locked / holding / lost) shows
+  "--" instead of guessing when the signal is weak. The README documents the
+  skin-tone gap and what the project deliberately does **not** measure.
+* **Fast first reading.** The camera and face tracking start before Python has
+  loaded, and measured frames are queued and analysed when it is ready. First
+  visit at 20 Mbit/s: camera in ~4 s, first heart rate in ~12 s.
+* **Tested.** 74 unit and end-to-end tests run in GitHub Actions on every push,
+  including a check that the JavaScript colour measurement matches the Python
+  one and simulated 2-minute sessions that test what the screen actually shows.
+* **Private.** Video never leaves the device. Recordings store per-frame
+  average colours only, never images.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Browser["Browser · JavaScript"]
+        Cam["Webcam<br/>1280×720"] --> FL["MediaPipe<br/>Face Landmarker"]
+        FL --> FX["features.js<br/>16 skin patches, wall,<br/>head pose, motion"]
+    end
+    subgraph Worker["Web Worker · Pyodide"]
+        LS["live_session.py"] --> DSP["vitals_dsp.py<br/>POS · CHROM · green<br/>cross-checked"]
+        DSP --> TR["vitals_stream.py<br/>tracker"]
+    end
+    FX -- "per-frame features<br/>(batched)" --> LS
+    TR -- "BPM, signal quality,<br/>lighting advice" --> UI["Dashboard<br/>(Canvas 2D)"]
+```
+
+The desktop app uses the same Python modules, with OpenCV and MediaPipe
+FaceMesh instead of the browser front end. The full per-frame pipeline:
 
 ```
 webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
@@ -26,6 +90,65 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
        -> tracker: acquiring / locked / holding / lost -> dashboard
           (first estimate after 5 s, with a stricter bar for short windows)
 ```
+
+## Tech stack
+
+| Area | Tools |
+| --- | --- |
+| Signal processing | Python, NumPy, SciPy (desktop) / `signal_lite.py` (browser) |
+| Computer vision | MediaPipe Face Landmarker (web), MediaPipe FaceMesh + OpenCV (desktop) |
+| Web | Vanilla JavaScript (ES modules), Web Workers, Pyodide, Canvas 2D, no framework |
+| Testing and CI | pytest, Node (JS/Python parity test), GitHub Actions |
+| Hosting | Vercel (static build: `node web/build.mjs`) |
+
+## Run it
+
+### In the browser
+
+Open [vitals-track.vercel.app](https://vitals-track.vercel.app) and click
+**Start camera**. To run it locally:
+
+```bash
+node web/build.mjs                         # assembles dist/ (page + the .py files it needs)
+cd dist && python -m http.server 8000      # open http://localhost:8000
+```
+
+Keys: `M` method · `B` background cancellation · `L` light mode · `R` patch SNR map · `P` performance.
+
+Deploying: `vercel.json` sets the build command and output folder, so importing
+the repo at vercel.com/new needs no configuration.
+
+### Desktop app
+
+```bash
+conda create -n vitals python=3.11 -y      # MediaPipe needs Python 3.9-3.12
+conda activate vitals
+pip install -r requirements.txt
+python vitals_app.py
+```
+
+Options: `--res 640x480`, `--no-motion-correction`, `--no-background` (run the
+analysis inline instead of in a background process).
+
+Keys: `v` liveness check, `q` quit, `m` method (auto / pos / green), `b`
+background cancellation, `l` light mode (white full-screen so the screen lights
+your face), `r` patch SNR map, `p` performance readout, `s` start/stop recording
+(average colours per frame only, never images).
+
+### Tests and benchmarks
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q tests
+
+python replay.py recordings/session_YYYYMMDD_HHMMSS.csv --ref 72   # 72 = your watch's BPM
+python session_benchmark.py              # simulated sessions: v3 vs v4 vs v5, still and fidgeting
+python session_benchmark.py --start      # how fast and how right is the first number?
+python session_benchmark.py --vanish     # does the number disappear when the pulse does?
+python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
+```
+
+## Project structure
 
 | File | What it does |
 | --- | --- |
@@ -49,64 +172,25 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | `session_benchmark.py` | End-to-end test of what the screen shows on simulated 2-minute sessions |
 | `tests/` | Unit and end-to-end tests (run in CI on every push) |
 
-## Run it (macOS)
+## How the web version works
 
-```zsh
-conda create -n vitals python=3.11 -y      # MediaPipe needs Python 3.9-3.12
-conda activate vitals
-pip install -r requirements.txt
-python vitals_app.py
-```
+The camera, face tracking (MediaPipe Face Landmarker) and the skin-patch
+colours run in JavaScript. The analysis is **this repo's Python**, run
+unchanged in a Web Worker with [Pyodide](https://pyodide.org), so the camera
+view never waits for it. The page downloads its code and the face model
+(~16 MB the first time, cached after), starting while the visitor reads the
+intro.
 
-Options: `--res 640x480` (old resolution, to A/B against the default 1280x720),
-`--no-motion-correction`, `--no-background` (run the analysis inline instead of in
-a background process, to compare speed).
+* Face tracking loads first and measuring starts right away. Python loads
+  during the first 5 s of collecting, then analyses everything measured so far.
+* `web/face_layout.json` (generated by `python face_layout.py >
+  web/face_layout.json`, and checked by a test) gives the page the face regions
+  without waiting for Python.
+* scipy is not loaded in the browser. `vitals_dsp` falls back to
+  `signal_lite.py`, numpy versions of the three scipy functions it uses.
+* On machines with software-only graphics, face tracking goes straight to CPU.
 
-Keys: `v` liveness check, `q` quit, `m` method (auto / pos / green), `b` background cancellation,
-`l` light mode (white full-screen so the screen lights your face), `r` patch SNR
-map, `p` performance readout, `s` start/stop recording (average colours per frame only, never images).
-
-```zsh
-python replay.py recordings/session_YYYYMMDD_HHMMSS.csv --ref 72   # 72 = your watch's BPM
-python session_benchmark.py              # simulated sessions: v3 vs v4 vs v5, still and fidgeting
-python session_benchmark.py --start      # how fast and how right is the first number?
-python session_benchmark.py --vanish     # does the number disappear when the pulse does?
-python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
-pip install pytest && python -m pytest -q tests
-```
-
-## Run it in the browser (web version)
-
-`web/` is a browser version that runs on any static host (it is set up for
-Vercel). The camera, face tracking (MediaPipe FaceLandmarker) and the
-skin-patch colours run in JavaScript; the analysis is **this repo's Python**
-(`live_session.py`, `vitals_dsp.py`, `vitals_stream.py`, `face_layout.py`),
-run unchanged in a Web Worker with [Pyodide](https://pyodide.org). Video never
-leaves the browser; the page only downloads its code and the face model
-(~16 MB the first time, cached after; it starts while you read the intro).
-Face tracking loads first and measuring starts right away; Python loads
-during the first 5 s of collecting and then analyses everything measured so
-far. `web/face_layout.json` (generated: `python face_layout.py >
-web/face_layout.json`) gives the page the face regions without waiting for
-Python.
-scipy is not loaded in the browser: `vitals_dsp` falls back to
-`signal_lite.py`, numpy copies of the three scipy functions it uses
-(checked against scipy by `tests/test_signal_lite.py`).
-
-```zsh
-node web/build.mjs                         # assembles dist/ (page + the .py files it needs)
-cd dist && python -m http.server 8000      # open http://localhost:8000
-```
-
-**Deploy to Vercel:** import the GitHub repo at vercel.com/new and click
-Deploy. `vercel.json` already sets the build (`node web/build.mjs`) and the
-output folder (`dist`), so there is nothing to configure. Or from a terminal:
-`npx vercel` (preview) and `npx vercel --prod`.
-
-Same keys as the desktop app (M, B, L, R, P). Not in the web version yet:
-the liveness check and recording. `tests/test_web_features.py` checks the
-JavaScript colour measurement against the Python one (needs Node), and
-`tests/test_live_session.py` the app logic the browser runs.
+Not in the web version yet: the liveness check and recording.
 
 ## Validation
 
@@ -147,10 +231,10 @@ Synthetic videos only test the plumbing. **UBFC-rPPG results: not run yet.**
 
 ## Privacy
 
-Everything runs on your machine. Recordings, liveness attempts and the
-evaluation cache store per-frame average colours only, never images. If
-you record other people, tell them that the video is analysed for heart
-rate, and get their consent.
+Everything runs on your device. Recordings, liveness attempts and the
+evaluation cache store per-frame average colours only, never images. If you
+record other people, tell them the video is analysed for heart rate and get
+their consent.
 
 ## Liveness check (prototype)
 
@@ -194,8 +278,8 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 * **Skin tone.** Melanin absorbs light, so darker skin reflects a weaker pulse
   signal. In simulation, darker skin gets a number on screen far less often
   (it shows "--" rather than guessing). This is a known weakness of camera-based
-  rPPG generally, not just this project, and the real-world size of the gap is
-  measured in Phase 4.
+  rPPG generally, not just this project. How large the gap is in practice will
+  be measured with real recordings (see [Roadmap](#roadmap)).
 * **Lighting and motion.** Dim light raises camera noise; movement corrupts the
   signal. The app tells you which one it sees, and it refuses to show a number
   when the signal is too weak.
@@ -214,3 +298,15 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 * **Simulated results only so far.** The benchmarks generate data from the
   same physics the methods assume, which flatters them. They test that the
   code does what it is designed to do; they are not accuracy validation.
+
+## Roadmap
+
+* **Real-world validation:** run `evaluate_video.py` on the UBFC-rPPG dataset
+  and on recordings with a pulse oximeter, and publish MAE / RMSE / Bland-Altman
+  results here.
+* **Breathing rate** from the same signal (0.1-0.5 Hz band).
+* Liveness check and recording in the web version.
+
+## License
+
+[MIT](LICENSE) © Abood Awaida
