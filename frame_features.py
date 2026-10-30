@@ -16,11 +16,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from face_layout import MOTION_LIMIT, SMALL_MOTION, SMOOTHING  # noqa: F401 (re-exported)
 from face_regions import background_color, extract_patch_colors, landmarks_to_array
-
-MOTION_LIMIT = 0.025     # nose movement per frame (fraction of face width) that counts as fast motion
-SMALL_MOTION = 0.008     # smaller movement: no pause, but auto mode then prefers POS
-SMOOTHING = 0.5          # landmark smoothing 0..1 (higher = steadier patches, more lag)
 
 
 def head_pose(lm, w, h):

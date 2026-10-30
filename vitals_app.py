@@ -38,23 +38,18 @@ import numpy as np
 
 from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
-from face_regions import PATCHES, REGIONS, assess_lighting, draw_overlay, patch_region
+from face_regions import PATCHES, assess_lighting, draw_overlay
 from frame_features import MOTION_LIMIT, SMALL_MOTION, FeatureExtractor
 from liveness import CHALLENGE_SEC, LivenessSession
 from vitals_dsp import analyze_heart_rate
 from vitals_stream import POSE_FIELDS, HeartRateTracker, SampleBuffer
+# Settings shared with the browser version (web/) live in live_session.py.
+from live_session import (FACE_GAP_SEC, METHODS, MIN_SEC, MOTION_HOLD, SNR_GOOD_DB, TALKING_STD,
+                          UPDATE_EVERY, WINDOW_SEC, region_summary)
 
-# ---------------- Settings you can tune ----------------
-WINDOW_SEC = 15          # seconds of history per estimate (15 s -> ~4 BPM frequency resolution)
-MIN_SEC = 5              # first estimate after 5 s (the tracker asks more of short windows)
-UPDATE_EVERY = 0.5       # seconds between estimates
-SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
-FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
-TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than this over 1 s = talking
-MOTION_HOLD = 1.5        # seconds to pause readings after big movement
+# ---------------- Settings you can tune (the rest are in live_session.py) ----------------
 FRAME_WIDTH = 640        # FaceMesh and the dashboard use a copy this wide (keeps them fast)
 WINDOW = "Vitals from Video"
-METHODS = ["auto", "pos", "green"]
 
 
 def open_camera(width, height):
@@ -106,21 +101,6 @@ def start_recording():
                     + [f"pose_{k}" for k in POSE_FIELDS] + ["frame_w", "frame_h"])
     print("recording to", path)
     return f, writer
-
-
-def region_summary(analysis):
-    """Best patch SNR and total weight share per region, for the dashboard."""
-    summary = {r: (None, 0.0) for r in REGIONS}
-    if not analysis:
-        return summary
-    for name, snr in analysis["patch_snr"].items():
-        if snr is None:
-            continue
-        region = patch_region(name)
-        best, share = summary[region]
-        summary[region] = (snr if best is None else max(best, snr),
-                           share + analysis["patch_weight"].get(name, 0.0))
-    return summary
 
 
 def perf_line(timer, fps, background):
