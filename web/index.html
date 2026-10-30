@@ -3,8 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Vitals from Video</title>
-  <meta name="description" content="Camera-based heart-rate estimation (rPPG) that runs entirely in your browser. Not a medical device.">
+  <title>Vitals: heart rate from your webcam</title>
+  <meta name="description" content="Measure your heart rate from an ordinary webcam. Remote photoplethysmography (rPPG) running entirely in your browser: MediaPipe face tracking in JavaScript, signal processing in Python via WebAssembly. Nothing is uploaded.">
+  <meta name="author" content="Abood Awaida">
+  <meta name="theme-color" content="#121416">
+  <link rel="canonical" href="https://vitals-track.vercel.app/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Vitals">
+  <meta property="og:title" content="Vitals: heart rate from your webcam">
+  <meta property="og:description" content="Camera-based heart-rate estimation (rPPG) that runs entirely in your browser. Python signal processing via WebAssembly, no uploads.">
+  <meta property="og:url" content="https://vitals-track.vercel.app/">
+  <meta property="og:image" content="https://vitals-track.vercel.app/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Vitals: heart rate from your webcam, with a pulse waveform">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Vitals: heart rate from your webcam">
+  <meta name="twitter:description" content="Camera-based heart-rate estimation (rPPG) that runs entirely in your browser.">
+  <meta name="twitter:image" content="https://vitals-track.vercel.app/og.png">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 28s-11-7-11-15a6 6 0 0 1 11-3 6 6 0 0 1 11 3c0 8-11 15-11 15z' fill='%23e5484d'/></svg>">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preconnect" href="https://storage.googleapis.com" crossorigin>
@@ -12,25 +28,70 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Vitals from Video</h1>
-    <p class="tagline">Heart-rate <em>estimation</em> from your webcam. Not a medical device.</p>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Vitals home">
+      <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><path d="M16 28s-11-7-11-15a6 6 0 0 1 11-3 6 6 0 0 1 11 3c0 8-11 15-11 15z" fill="#e5484d"/></svg>
+      Vitals
+    </a>
+    <a class="gh" href="https://github.com/aboodgitawaida/Vitals">
+      <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      Source code
+    </a>
   </header>
 
-  <section id="intro" class="card">
-    <h2>How it works</h2>
-    <p>Each heartbeat changes your skin's colour very slightly. The page measures 16 small skin
-       patches on your forehead and cheeks, removes what room light and head movement explain,
-       and finds the rhythm in the last 15 seconds.</p>
-    <p><strong>Everything runs in this browser tab.</strong> No video, image or measurement is
-       uploaded or saved. The page only downloads its code and the face-tracking model.</p>
-    <ul>
-      <li>Sit still, face the camera, in good, even light (a window or lamp in front of you).</li>
-      <li>The first number appears after about 5 seconds; it describes roughly the last 15.</li>
-      <li>Not for health, stress or diagnostic use. Accuracy has only been tested on simulated data.</li>
-    </ul>
-    <button id="start" class="primary">Start camera</button>
-    <p id="load-status" class="muted" role="status" aria-live="polite"></p>
+  <section id="intro">
+    <div class="hero">
+      <div class="hero-text">
+        <h1>Your heart rate, from an ordinary webcam.</h1>
+        <p class="lead">Each heartbeat changes your skin's colour very slightly, too little to see.
+          Vitals tracks your face, measures that colour in 16 skin patches, removes what room light
+          and head movement explain, and finds the rhythm. No wearable, no upload.</p>
+        <div class="cta">
+          <button id="start" class="primary">Start camera</button>
+          <span class="muted small">Free, no sign-up. Video never leaves this tab.</span>
+        </div>
+        <p id="load-status" class="muted small" role="status" aria-live="polite"></p>
+      </div>
+      <svg class="hero-wave" viewBox="0 0 400 120" aria-hidden="true" preserveAspectRatio="none">
+        <path d="M0 70 H70 L85 70 L95 40 L105 95 L118 20 L130 80 L140 70 H200 L215 70 L225 40 L235 95 L248 20 L260 80 L270 70 H330 L345 70 L355 40 L365 95 L378 20 L390 80 L400 70"
+              fill="none" stroke="var(--none)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+    </div>
+
+    <div class="features">
+      <article class="feature">
+        <h2>Private by design</h2>
+        <p>The camera, face tracking and analysis all run in your browser. No video, image or
+           measurement is uploaded or saved.</p>
+      </article>
+      <article class="feature">
+        <h2>Python in the browser</h2>
+        <p>The signal processing is the project's own Python, run unchanged in a Web Worker with
+           Pyodide (WebAssembly). The same code powers the desktop app and its test suite.</p>
+      </article>
+      <article class="feature">
+        <h2>Says "--" rather than guess</h2>
+        <p>Three methods (POS, CHROM, green) must agree before a number is shown. Weak light,
+           movement and darker skin give weaker signals, and the page tells you which one it sees.</p>
+      </article>
+    </div>
+
+    <section class="card how">
+      <h2>For the best reading</h2>
+      <ol>
+        <li>Sit still and face the camera, in good, even light (a window or lamp in front of you).</li>
+        <li>The first number appears after about 5 seconds and describes roughly the last 15.</li>
+        <li>Try <strong>Light mode</strong> in a dim room: the screen turns white and lights your face.</li>
+      </ol>
+      <p class="muted small">Not a medical device. Not for health, stress or diagnostic use.
+         Accuracy so far has been tested on simulated data only.</p>
+    </section>
+
+    <section class="stack" aria-label="Built with">
+      <span>Python</span><span>NumPy / SciPy</span><span>Pyodide (WebAssembly)</span>
+      <span>MediaPipe Face Landmarker</span><span>JavaScript (no framework)</span><span>Canvas 2D</span>
+      <span>OpenCV (desktop app)</span><span>pytest + GitHub Actions</span><span>Vercel</span>
+    </section>
   </section>
 
   <main id="app" hidden>
@@ -84,8 +145,8 @@
   </main>
 
   <footer class="muted small">
-    Research and learning project. Darker skin and dim light give weaker signals; the page shows
-    "--" rather than guess. <a href="https://github.com/aboodgitawaida/Vitals">Source code</a>
+    <span>Built by <a href="https://github.com/aboodgitawaida">Abood Awaida</a>.</span>
+    <span><a href="https://github.com/aboodgitawaida/Vitals">Source code and technical write-up on GitHub</a></span>
   </footer>
 </body>
 </html>
