@@ -18,6 +18,7 @@ Inputs (any mix):
     python evaluate_video.py path/to/UBFC/DATASET_2
     python evaluate_video.py test_videos/selfie_72
     python evaluate_video.py my_video.mp4 --ref-bpm 68
+    python evaluate_video.py mcd_rppg --jobs 4       # MCD-rPPG sample (fetch_mcd_rppg.py), 4 videos at a time
 
 Reference heart rate per window: the spectral peak of the pulse-oximeter
 waveform over the SAME 15 s window (standard practice; the oximeter's own HR
@@ -162,6 +163,20 @@ WINDOW_METHODS = {          # name: analyze_heart_rate settings
 }
 
 
+def _extract_one(video):
+    """Worker for --jobs: one FaceMesh per process; the result goes to the feature cache."""
+    extract_features(video)
+    return video
+
+
+def extract_in_parallel(videos, jobs):
+    """Fill the feature cache using several processes (FaceMesh is the slow part)."""
+    from multiprocessing import get_context
+    with get_context("spawn").Pool(jobs) as pool:
+        for i, video in enumerate(pool.imap_unordered(_extract_one, videos), 1):
+            print(f"   features ready {i}/{len(videos)}: {video}", flush=True)
+
+
 def evaluate_subject(feats, ref_fn):
     """
     ref_fn(t_end) -> reference BPM for the window ending at t_end, or None.
@@ -228,14 +243,17 @@ def main():
     ap.add_argument("paths", nargs="+", help="videos, subject folders or a dataset folder")
     ap.add_argument("--ref-bpm", type=float, help="constant reference heart rate for plain videos")
     ap.add_argument("--out", default="eval_results", help="folder for the plot and tables")
+    ap.add_argument("--jobs", type=int, default=1, help="videos to process at the same time")
     args = ap.parse_args()
 
     subjects = find_subjects(args.paths)
     if not subjects:
         raise SystemExit("No videos found.")
+    if args.jobs > 1:
+        extract_in_parallel([v for _, v, _ in subjects], args.jobs)
     os.makedirs(args.out, exist_ok=True)
     all_windows = {m: [] for m in WINDOW_METHODS}
-    all_screen, rows = [], []
+    all_screen, rows, groups = [], [], {}
     for name, video, gt in subjects:
         if gt:
             gt_t, gt_ppg, _ = read_ground_truth(gt)
@@ -256,6 +274,8 @@ def main():
         for m in WINDOW_METHODS:
             all_windows[m] += [(e, r) for _, e, r in res["windows"][m]]
         all_screen += [(e, r) for _, e, r in res["screen"]]
+        if "_" in name:                             # e.g. 1020_before / 1020_after (MCD-rPPG)
+            groups.setdefault(name.rsplit("_", 1)[1], []).extend((e, r) for _, e, r in res["screen"])
 
     if not rows:
         return
@@ -271,6 +291,17 @@ def main():
     print(f"\n2) What the app would have shown: coverage {cov:.0%}, MAE {x['MAE']:.2f}, RMSE {x['RMSE']:.2f}, "
           f"r {x['r']:.2f}, within 5 BPM {x['<=5']:.0%}")
     md.append(f"| app display (tracker on) | coverage {cov:.0%} | {x['MAE']:.2f} | {x['RMSE']:.2f} | {x['r']:.2f} | {x['<=5']:.0%} |")
+    if len(groups) > 1:                             # e.g. at rest vs after exercise
+        print("\n3) What the app showed, by group (folder name after the last _):")
+        md += ["", "| Group | Coverage | Mean reference (BPM) | MAE (BPM) | RMSE (BPM) | Within 5 BPM |",
+               "| --- | --- | --- | --- | --- | --- |"]
+        for g, pairs in sorted(groups.items()):
+            x = metrics(pairs)
+            gcov = np.mean([e is not None for e, _ in pairs])
+            ref = np.mean([r for _, r in pairs])
+            print(f"   {g:<10} coverage {gcov:.0%}, mean reference {ref:.0f} BPM, MAE {x['MAE']:.2f}, "
+                  f"RMSE {x['RMSE']:.2f}, within 5 BPM {x['<=5']:.0%}")
+            md.append(f"| {g} | {gcov:.0%} | {ref:.0f} | {x['MAE']:.2f} | {x['RMSE']:.2f} | {x['<=5']:.0%} |")
     with open(os.path.join(args.out, "summary.md"), "w") as f:
         f.write("\n".join(md) + "\n")
     with open(os.path.join(args.out, "per_video.csv"), "w") as f:
