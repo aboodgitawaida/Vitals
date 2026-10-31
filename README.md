@@ -28,8 +28,17 @@ There are two front ends over one signal-processing core:
 * **Desktop app** (`vitals_app.py`): OpenCV dashboard with recording, replay
   and a liveness-check prototype.
 
-> Not a medical device. Not for health, stress or diagnostic use. Accuracy has
-> so far been tested on simulated data only (see [Validation](#validation)).
+**Tested on real people, honestly:** on a random sample of the public
+[MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg) dataset, Vitals is accurate
+for some people (within ~1 BPM of a finger pulse sensor) but not yet reliable across
+everyone: its average error is well above what the dataset's authors report for the
+same classic method. The numbers, the failure patterns and the plan to close the gap
+are in [Validation](#validation).
+
+> Not a medical device. Not for health, stress or diagnostic use.
+
+<p align="center"><img src="web/screenshot.png" alt="The Vitals dashboard measuring a heart rate of 74 BPM from a dataset video (face blurred)" width="860"><br>
+<sub>The web app reading a real recording through a virtual camera: 74 BPM, finger sensor 73-77 BPM. Face blurred; video from MCD-rPPG (CC BY 4.0).</sub></p>
 
 ## Highlights
 
@@ -49,7 +58,12 @@ There are two front ends over one signal-processing core:
 * **Fast first reading.** The camera and face tracking start before Python has
   loaded, and measured frames are queued and analysed when it is ready. First
   visit at 20 Mbit/s: camera in ~4 s, first heart rate in ~12 s.
-* **Tested.** 74 unit and end-to-end tests run in GitHub Actions on every push,
+* **Evaluated on real data, results published as they are.** A reproducible
+  evaluation on a random sample of a public research dataset (two commands,
+  see [Validation](#validation)), with the standard rPPG metrics (MAE, RMSE,
+  Pearson r, Bland-Altman), a comparison with the published baseline, and
+  the failure cases.
+* **Tested.** 76 unit and end-to-end tests run in GitHub Actions on every push,
   including a check that the JavaScript colour measurement matches the Python
   one and simulated 2-minute sessions that test what the screen actually shows.
 * **Private.** Video never leaves the device. Recordings store per-frame
@@ -146,6 +160,8 @@ python session_benchmark.py              # simulated sessions: v3 vs v4 vs v5, s
 python session_benchmark.py --start      # how fast and how right is the first number?
 python session_benchmark.py --vanish     # does the number disappear when the pulse does?
 python session_benchmark.py --calibrate  # how often pure noise passes the thresholds
+
+node web/build.mjs && node tests/browser_check.mjs cam.y4m   # the web app, with a video file as the webcam
 ```
 
 ## Project structure
@@ -159,7 +175,8 @@ python session_benchmark.py --calibrate  # how often pure noise passes the thres
 | `web/` | Browser version (Vercel): camera + MediaPipe in JS, the Python analysis via Pyodide |
 | `vitals_dsp.py` | All signal processing (no camera code, fully testable) |
 | `frame_features.py` | Per-frame skin colours, wall, head pose and motion, shared by the app and the video tools |
-| `evaluate_video.py` | Accuracy on videos with a reference (UBFC-rPPG dataset, test videos, your own clips) |
+| `evaluate_video.py` | Accuracy on videos with a reference (MCD-rPPG, UBFC-rPPG, test videos, your own clips) |
+| `fetch_mcd_rppg.py` | Downloads a random, reproducible sample of the public MCD-rPPG dataset for `evaluate_video.py` |
 | `make_test_video.py` | Turns a selfie into a test video with a known heart rate |
 | `vitals_stream.py` | Rolling buffer and display tracker, shared by app, replay and benchmarks |
 | `face_regions.py` | Skin regions, patch grid, skin filter, background boxes, lighting coach |
@@ -195,26 +212,98 @@ Not in the web version yet: the liveness check and recording.
 ## Validation
 
 Accuracy is measured the way rPPG research does it: run the pipeline on
-videos recorded with a contact sensor and compare, window by window.
+videos recorded together with a contact sensor and compare, window by window.
 
-```zsh
+### Results on real people (MCD-rPPG)
+
+[MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg) (Egorov et al.,
+*Gaze into the Heart*, ACM Multimedia 2025, CC BY 4.0) is a public dataset of
+600 people filmed for 3 minutes at rest and again after exercise, with a
+finger PPG sensor recorded at the same time. Vitals was run on the frontal
+webcam (640×480, 30 fps) for 15 people drawn at random with a fixed seed,
+both sessions each: 30 recordings, 90 minutes of video. Nothing was
+tuned on this data.
+
+```bash
+python fetch_mcd_rppg.py --subjects 15 --out mcd_rppg    # random sample, seed 0, ~2.4 GB
+python evaluate_video.py mcd_rppg --jobs 4
+```
+
+**What the app shows** (tracker on, number on screen vs the sensor, every second):
+
+| Coverage (a number is shown) | MAE | RMSE | Pearson r | Within 5 BPM |
+| --- | --- | --- | --- | --- |
+| 61% | 15.5 BPM | 23.5 BPM | 0.18 | 44% |
+
+**Every 15 s window, every method** (the usual way rPPG papers report, no tracker):
+
+| Method | Windows | MAE (BPM) | RMSE (BPM) | Pearson r | Within 5 BPM |
+| --- | --- | --- | --- | --- | --- |
+| green | 5068 | 12.60 | 20.77 | 0.45 | 51% |
+| POS | 5068 | 12.81 | 20.26 | 0.42 | 46% |
+| CHROM | 5068 | 18.72 | 27.20 | 0.17 | 33% |
+| full pipeline (auto) | 5068 | 12.50 | 20.44 | 0.44 | 51% |
+
+**At rest vs after exercise** (what the app shows):
+
+| Session | Coverage | Mean sensor HR | MAE (BPM) | Within 5 BPM |
+| --- | --- | --- | --- | --- |
+| at rest (before) | 62% | 84 BPM | 15.1 | 38% |
+| after exercise | 60% | 86 BPM | 15.9 | 49% |
+
+<p align="center"><img src="docs/validation/bland_altman.png" alt="Bland-Altman plot of camera vs PPG sensor heart rate" width="620"></p>
+
+**What this shows.**
+
+* **It works for some people and not others.** On 7 of 30 recordings the
+  per-window error is under 5 BPM (subject 4312 after exercise: 1.0 BPM,
+  with a number on screen 99% of the time), but the median recording is off
+  by 10 BPM.
+* **It is behind the published baseline.** The dataset's paper reports
+  3.8 BPM MAE for plain POS on the frontal camera (their protocol, which
+  differs from 15 s windows). Vitals' POS gets 12.8 BPM here, so the gap is
+  in this project's pipeline, not in the method.
+* **The tracker is too confident.** When it shows a number it is no more
+  accurate than the raw windows (15.5 vs 12.5 BPM), so its quality gates,
+  calibrated on simulated data, let wrong readings through.
+* **Failure patterns** (per-window estimates against the sensor):
+  readings that stay near 60 BPM while the true rate is 75-80; half or
+  double the true rate (50 for 100, 145 for 75); and occasional jumps to
+  ~145-150 BPM. The videos are MPEG-4 with a keyframe every 12 frames
+  (2.5 Hz, i.e. 150 BPM), a likely source of that last one.
+
+**Next steps:** measure skin colour over larger regions (the face is small in
+a 640×480 frame, so each of the 16 patches averages few pixels), reject the
+codec's keyframe frequency, add a harmonic check between half and double
+rates, and recalibrate the tracker's thresholds on real data instead of
+simulation.
+
+Per-recording results: [`docs/validation/per_video.csv`](docs/validation/per_video.csv).
+The reference heart rate is the spectral peak of the sensor's waveform over the
+same 15 s window.
+
+### Synthetic test videos
+
+```bash
 python make_test_video.py selfie.jpg --bpm 72          # known-BPM test video from a photo
 python evaluate_video.py test_videos/selfie_72
-python evaluate_video.py path/to/UBFC-rPPG/DATASET_2   # public research dataset (request access)
 python evaluate_video.py my_clip.mp4 --ref-bpm 68      # your own clip + a watch reading
 ```
 
-It reports, per method and for what the app would display: MAE, RMSE,
-Pearson r, share within 5 BPM, and a Bland-Altman plot. The reference heart
-rate is computed from the pulse-oximeter waveform over the same 15 s windows.
+The full video pipeline (decoding, compression, frame features, analysis,
+tracker) recovers a known heart rate from synthetic test videos with under
+0.2 BPM error, including head sway and in-band lamp flicker. In the flicker
+video, single methods failed in different ways (POS locked onto the flicker
+without wall cancellation; CHROM with it) while the full pipeline stayed
+correct: that is why the three methods are cross-checked.
 
-**Status:** the full video pipeline (decoding, compression, frame features,
-analysis, tracker) recovers a known heart rate from synthetic test videos
-with under 0.2 BPM error, including head sway and in-band lamp flicker. In
-the flicker video, single methods failed in different ways (POS locked onto
-the flicker without wall cancellation; CHROM with it) while the full
-pipeline stayed correct: that is why the three methods are cross-checked.
-Synthetic videos only test the plumbing. **UBFC-rPPG results: not run yet.**
+### The web app on a real video
+
+`tests/browser_check.mjs` runs the built web app in headless Chromium with a
+dataset video as the webcam, so the browser path (MediaPipe in JavaScript,
+Python in Pyodide, the dashboard) is checked on real footage too. On subject
+1020 at rest (one of the recordings where the pipeline works) it showed
+69-76 BPM while the sensor read 73-77 BPM.
 
 ## What this project deliberately does not measure
 
@@ -295,15 +384,17 @@ OLED phone, a matte photo under a lamp) still need testing in person.
   is measured with `replay.py` (motion correction on vs off).
 * **Lag.** The number describes roughly the last 15 seconds, so it reacts to
   changes with a delay of several seconds.
-* **Simulated results only so far.** The benchmarks generate data from the
-  same physics the methods assume, which flatters them. They test that the
-  code does what it is designed to do; they are not accuracy validation.
+* **One real dataset so far.** The real-data numbers come from one recording
+  setup (one room and lighting, people sitting still, recorded in one country). The
+  simulated benchmarks generate data from the same physics the methods
+  assume, which flatters them; they test that the code does what it is
+  designed to do, not accuracy.
 
 ## Roadmap
 
-* **Real-world validation:** run `evaluate_video.py` on the UBFC-rPPG dataset
-  and on recordings with a pulse oximeter, and publish MAE / RMSE / Bland-Altman
-  results here.
+* **Close the gap on real data** (see [Validation](#validation) for the
+  plan), then the full MCD-rPPG set (600 people, three cameras), UBFC-rPPG,
+  dim rooms and a wider range of skin tones.
 * **Breathing rate** from the same signal (0.1-0.5 Hz band).
 * Liveness check and recording in the web version.
 
