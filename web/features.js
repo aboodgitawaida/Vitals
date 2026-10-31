@@ -1,4 +1,4 @@
-// features.js -- browser port of face_regions.extract_patch_colors / background_color
+// features.js -- browser port of face_regions.extract_patch_colors / face_color / background_color
 // and frame_features.FeatureExtractor: everything measured from ONE video frame.
 //
 // It needs the camera's pixels, so it runs in the page, not in Python. The regions,
@@ -30,7 +30,7 @@ function convexHull(points) {
   return lower.concat(upper);
 }
 
-function fillConvex(mask, w, h, hull) {
+function fillConvex(mask, w, h, hull, value = 1) {
   // Scanline fill of a convex polygon, boundary included (like cv2.fillConvexPoly).
   if (hull.length === 0) return;
   let y0 = Infinity, y1 = -Infinity;
@@ -50,7 +50,7 @@ function fillConvex(mask, w, h, hull) {
     }
     if (xl > xr) continue;
     const from = Math.max(Math.round(xl), 0), to = Math.min(Math.round(xr), w - 1);
-    for (let x = from; x <= to; x++) mask[y * w + x] = 1;
+    for (let x = from; x <= to; x++) mask[y * w + x] = value;
   }
 }
 
@@ -140,6 +140,27 @@ export function extractPatchColors(frame, lm, cfg) {
   return { colors, patches, regions, stats };
 }
 
+export function faceColor(frame, lm, cfg) {
+  // Mean RGB of the whole face minus eyes, brows and lips (face_regions.face_color).
+  const { data, width: W, height: H } = frame;
+  const { x, y, w, h, mask } = regionCrop(lm, cfg.FACE_OVAL, W, H);
+  for (const indices of cfg.FACE_EXCLUDE) {
+    const pts = indices.map((i) => [Math.trunc(lm[i][0]) - x, Math.trunc(lm[i][1]) - y]);
+    fillConvex(mask, w, h, convexHull(pts), 0);
+  }
+  const cw = Math.min(w, W - x), ch = Math.min(h, H - y);
+  let n = 0, sr = 0, sg = 0, sb = 0;
+  for (let r = 0; r < ch; r++) {
+    for (let c = 0; c < cw; c++) {
+      if (!mask[r * w + c]) continue;
+      const o = ((y + r) * W + (x + c)) * 4;
+      if (Math.max(data[o], data[o + 1], data[o + 2]) >= cfg.CLIP_LEVEL) continue;
+      sr += data[o]; sg += data[o + 1]; sb += data[o + 2]; n++;
+    }
+  }
+  return n >= cfg.MIN_FACE_PIXELS ? [sr / n, sg / n, sb / n] : null;
+}
+
 export function backgroundColor(frame, lm, cfg) {
   // Mean RGB of the wall in the top corners, skipping boxes that overlap the head.
   const { data, width: w, height: h } = frame;
@@ -191,6 +212,7 @@ export class FeatureExtractor {
       cfg.SMOOTHING * p[0] + (1 - cfg.SMOOTHING) * lm[i][0],
       cfg.SMOOTHING * p[1] + (1 - cfg.SMOOTHING) * lm[i][1]]);
     const patchInfo = extractPatchColors(frame, this.smooth, cfg);
+    patchInfo.colors[cfg.FACE_TRACE] = faceColor(frame, this.smooth, cfg);
     const bg = backgroundColor(frame, this.smooth, cfg);
     return {
       face: true, colors: patchInfo.colors, bg_rgb: bg.rgb,
