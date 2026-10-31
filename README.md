@@ -307,6 +307,10 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 * **Breathing rate** from the same signal (0.1-0.5 Hz band).
 * Liveness check and recording in the web version.
 
+## Author
+
+**Abood Awaida** · [GitHub](https://github.com/aboodgitawaida) · [LinkedIn](https://www.linkedin.com/in/abood-awaida-83b988417/)
+
 ## License
 
-[MIT](LICENSE) © Abood Awaida
+[MIT](LICENSE)
