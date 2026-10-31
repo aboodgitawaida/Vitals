@@ -309,7 +309,7 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 
 ## Author
 
-**Abood Awaida** · [GitHub](https://github.com/aboodgitawaida) · [LinkedIn](https://www.linkedin.com/in/abood-awaida-83b988417/)
+**Abood Awaida** · [GitHub](https://github.com/aboodgitawaida) · [LinkedIn](https://www.linkedin.com/in/abood-awaida/)
 
 ## License
 
