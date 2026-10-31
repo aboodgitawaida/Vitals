@@ -18,6 +18,7 @@ Inputs (any mix):
     python evaluate_video.py path/to/UBFC/DATASET_2
     python evaluate_video.py test_videos/selfie_72
     python evaluate_video.py my_video.mp4 --ref-bpm 68
+    python evaluate_video.py mcd_rppg --jobs 4       # MCD-rPPG sample (fetch_mcd_rppg.py), 4 videos at a time
 
 Reference heart rate per window: the spectral peak of the pulse-oximeter
 waveform over the SAME 15 s window (standard practice; the oximeter's own HR
@@ -188,6 +189,30 @@ def evaluate_subject(feats, ref_fn):
     return {"windows": windows, "screen": screen}
 
 
+def score_video(job):
+    """(name, video, ground truth or None, constant reference or None) -> (name, evaluate_subject result).
+    A top-level function so --jobs can run it in worker processes."""
+    name, video, gt, ref_bpm = job
+    if gt:
+        gt_t, gt_ppg, _ = read_ground_truth(gt)
+        ref_fn = lambda te: reference_bpm(gt_t, gt_ppg, te)
+    else:
+        ref_fn = lambda te: ref_bpm
+    return name, evaluate_subject(extract_features(video), ref_fn)
+
+
+def score_all(jobs, workers):
+    """Yield (name, result) in input order, using several processes if workers > 1 (FaceMesh is slow)."""
+    if workers <= 1:
+        for job in jobs:
+            print(f"{job[0]}: analysing {job[1]} ...", flush=True)
+            yield score_video(job)
+        return
+    from multiprocessing import get_context
+    with get_context("spawn").Pool(workers) as pool:
+        yield from pool.imap(score_video, jobs)
+
+
 def metrics(pairs):
     """pairs: [(estimate or None, reference)] -> dict of standard rPPG metrics."""
     pairs = [(e, r) for e, r in pairs if e is not None]
@@ -228,34 +253,33 @@ def main():
     ap.add_argument("paths", nargs="+", help="videos, subject folders or a dataset folder")
     ap.add_argument("--ref-bpm", type=float, help="constant reference heart rate for plain videos")
     ap.add_argument("--out", default="eval_results", help="folder for the plot and tables")
+    ap.add_argument("--jobs", type=int, default=1, help="videos to analyse at the same time (processes)")
     args = ap.parse_args()
 
     subjects = find_subjects(args.paths)
     if not subjects:
         raise SystemExit("No videos found.")
-    os.makedirs(args.out, exist_ok=True)
-    all_windows = {m: [] for m in WINDOW_METHODS}
-    all_screen, rows = [], []
+    jobs = []
     for name, video, gt in subjects:
-        if gt:
-            gt_t, gt_ppg, _ = read_ground_truth(gt)
-            ref_fn = lambda te, gt_t=gt_t, gt_ppg=gt_ppg: reference_bpm(gt_t, gt_ppg, te)
-        elif args.ref_bpm:
-            ref_fn = lambda te: args.ref_bpm
+        if gt or args.ref_bpm:
+            jobs.append((name, video, gt, args.ref_bpm))
         else:
             print(f"skip {name}: no ground_truth.txt and no --ref-bpm")
-            continue
-        print(f"{name}: extracting features from {video} ...", flush=True)
-        feats = extract_features(video)
-        res = evaluate_subject(feats, ref_fn)
+    os.makedirs(args.out, exist_ok=True)
+    all_windows = {m: [] for m in WINDOW_METHODS}
+    all_screen, rows, groups = [], [], {}
+    for name, res in score_all(jobs, args.jobs):
         m_all = metrics([(e, r) for _, e, r in res["windows"]["full pipeline (auto)"]])
         m_scr = metrics([(e, r) for _, e, r in res["screen"]])
         cov = np.mean([e is not None for _, e, _ in res["screen"]]) if res["screen"] else np.nan
-        print(f"   windows MAE {m_all['MAE']:.1f} BPM | on screen: coverage {cov:.0%}, MAE {m_scr['MAE']:.1f} BPM")
+        print(f"{name}: windows MAE {m_all['MAE']:.1f} BPM | on screen: coverage {cov:.0%}, "
+              f"MAE {m_scr['MAE']:.1f} BPM", flush=True)
         rows.append((name, m_all, m_scr, cov))
         for m in WINDOW_METHODS:
             all_windows[m] += [(e, r) for _, e, r in res["windows"][m]]
         all_screen += [(e, r) for _, e, r in res["screen"]]
+        if "_" in name:                             # e.g. 1020_before / 1020_after (MCD-rPPG)
+            groups.setdefault(name.rsplit("_", 1)[1], []).extend((e, r) for _, e, r in res["screen"])
 
     if not rows:
         return
@@ -271,6 +295,17 @@ def main():
     print(f"\n2) What the app would have shown: coverage {cov:.0%}, MAE {x['MAE']:.2f}, RMSE {x['RMSE']:.2f}, "
           f"r {x['r']:.2f}, within 5 BPM {x['<=5']:.0%}")
     md.append(f"| app display (tracker on) | coverage {cov:.0%} | {x['MAE']:.2f} | {x['RMSE']:.2f} | {x['r']:.2f} | {x['<=5']:.0%} |")
+    if len(groups) > 1:                             # e.g. at rest vs after exercise
+        print("\n3) What the app showed, by group (folder name after the last _):")
+        md += ["", "| Group | Coverage | Mean reference (BPM) | MAE (BPM) | RMSE (BPM) | Within 5 BPM |",
+               "| --- | --- | --- | --- | --- | --- |"]
+        for g, pairs in sorted(groups.items()):
+            x = metrics(pairs)
+            gcov = np.mean([e is not None for e, _ in pairs])
+            ref = np.mean([r for _, r in pairs])
+            print(f"   {g:<10} coverage {gcov:.0%}, mean reference {ref:.0f} BPM, MAE {x['MAE']:.2f}, "
+                  f"RMSE {x['RMSE']:.2f}, within 5 BPM {x['<=5']:.0%}")
+            md.append(f"| {g} | {gcov:.0%} | {ref:.0f} | {x['MAE']:.2f} | {x['RMSE']:.2f} | {x['<=5']:.0%} |")
     with open(os.path.join(args.out, "summary.md"), "w") as f:
         f.write("\n".join(md) + "\n")
     with open(os.path.join(args.out, "per_video.csv"), "w") as f:
