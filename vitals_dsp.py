@@ -13,17 +13,26 @@ skin each frame and you get a tiny wobble at your heart rate, buried under
 much bigger changes from lighting, the camera and movement. Everything below
 is about digging that wobble out.
 
-v3 PIPELINE
-  for each of 16 small skin patches:
-      mean RGB per frame -> even 30 Hz -> remove room-light changes seen on the
-      background wall -> normalise -> measure noise above 5 Hz
-  inverse-noise-weighted average of all patches -> POS projection
+PIPELINE
+  whole-face mean RGB per frame (eyes, brows, lips excluded) -> even 30 Hz
+  -> remove room-light changes seen on the background wall -> POS projection
   -> bandpass 0.7-4 Hz -> spectrum -> harmonic-aware peak with tracking
   -> BPM + SNR
+  The 16 small skin patches are analysed too, for the on-screen SNR map, and
+  are pooled into the pulse signal only when there is no whole-face colour
+  (older recordings, simulations).
+
+Why the whole face: on real recordings (MCD-rPPG, see README) it beat the
+16 inverse-noise-weighted patches by a wide margin (per-window MAE 12.5 ->
+8.7 BPM on the development set). On a small face each patch averages few
+pixels and its edges move with every pixel of landmark jitter; that noise
+was larger than the pulse.
 """
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
+
+from face_layout import FACE_TRACE
 try:
     from scipy.signal import butter, filtfilt, detrend
 except ImportError:          # the browser version: numpy-only copies, ~14 MB less to download
@@ -237,6 +246,8 @@ def chrom_pulse(rgb, fs=FS, win_sec=1.6):
     return h
 
 
+GREEN_MARGIN_DB = 6.0    # auto mode: green must beat POS by this much (dB) to be used. On real
+                         # recordings green was rarely better and often fooled by noise.
 METHODS = {"pos": pos_pulse, "chrom": chrom_pulse, "green": lambda rgb, fs=FS: green_pulse(rgb)}
 AGREE_BPM = 5.0          # two methods "agree" when their peaks are this close
 
@@ -318,18 +329,19 @@ def noise_level(normalized, fs=FS, cutoff_hz=5.0):
 
 
 def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev_bpm=None,
-                       use_background=True, use_harmonics=True, green_margin_db=0.0,
+                       use_background=True, use_harmonics=True, green_margin_db=GREEN_MARGIN_DB,
                        patch_map=True, pose=None, use_motion=True, fs=FS):
     """
     Full pipeline for one update.
 
     times:          (N,) timestamps in seconds
-    patch_traces:   {patch name: (N, 3) mean RGB per frame, NaN rows = missing}
+    patch_traces:   {patch name: (N, 3) mean RGB per frame, NaN rows = missing}. An entry
+                    named FACE_TRACE (whole face) is used as the pulse signal when usable.
     background:     (N, 3) mean RGB of the background wall, or None
     method:         "auto" (try both, keep cleaner), "pos" or "green"
     prev_bpm:       last confident reading, for tracking (or None)
     green_margin_db: in auto mode, green must beat POS by this many dB to be
-                    chosen. The app raises it to 3 dB when the head moved during
+                    chosen. The app raises it by 3 dB when the head moved during
                     the window, because motion creates clean-looking false peaks
                     in green that POS cancels.
     patch_map:      also compute per-patch SNR for the on-screen map. Display
@@ -337,6 +349,10 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     pose:           (N, K) head pose per frame from FaceMesh (x, y, scale, roll, mouth), or None.
     use_motion:     regress head-pose effects out of each patch where the head
                     moved enough to matter (motion_explained >= MOTION_R2_MIN).
+                    Not applied to the whole-face signal: on real recordings of
+                    people sitting still it removed more pulse than motion (the
+                    head moves very slightly with every heartbeat), even with a
+                    stricter threshold.
 
     Why many small patches instead of 3 big regions? With light from one
     side, part of a cheek is lit and part is in shadow. Shadowed skin
@@ -380,8 +396,12 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     with_pose = np.hstack(references) if references else None
     motion_patches = 0
 
+    face = patch_traces.get(FACE_TRACE)
+    face = None if face is None else _fill_missing(t, np.asarray(face, dtype=float))
     pooled, total_weight, patch_snr, patch_weight = None, 0.0, {}, {}
     for name, rgb in patch_traces.items():
+        if name == FACE_TRACE:
+            continue
         rgb = _fill_missing(t, np.asarray(rgb, dtype=float))
         if rgb is None:
             patch_snr[name] = None
@@ -405,7 +425,14 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         f, p = power_spectrum(pulse_signal(rgb_u, map_method, fs), fs)
         patch_snr[name] = snr_db(f, p, pick_peak(f, p, HR_LOW, HR_HIGH), HR_LOW, HR_HIGH)
 
-    if pooled is None:
+    if face is not None:                                       # the pulse comes from the whole face
+        _, face_u = resample_uniform(t, face, fs)
+        if background_only is not None:
+            face_u = remove_nuisance(face_u, background_only)
+        pulse_rgb = face_u / face_u.mean(axis=0)
+    elif pooled is not None:
+        pulse_rgb = pooled / total_weight
+    else:
         return None
 
     # Step 4. In "auto" mode, try both methods and keep the cleaner spectrum.
@@ -417,7 +444,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     prior_hz = prev_bpm / 60.0 if prev_bpm else None
     candidates = []
     for m in (["pos", "green"] if method == "auto" else [method]):
-        fused = pulse_signal(pooled / total_weight, m, fs)
+        fused = pulse_signal(pulse_rgb, m, fs)
         fused = fused / (fused.std() + 1e-12)
         freqs, power = power_spectrum(fused, fs)
         f0 = pick_peak(freqs, power, HR_LOW, HR_HIGH, prior_hz, harmonics=use_harmonics)
@@ -432,7 +459,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     # different weaknesses (motion, flicker, dim-light noise) see the same pulse.
     method_bpm = {}
     for m in METHODS:
-        sig = pulse_signal(pooled / total_weight, m, fs)
+        sig = pulse_signal(pulse_rgb, m, fs)
         fq, pw = power_spectrum(sig / (sig.std() + 1e-12), fs)
         method_bpm[m] = 60.0 * pick_peak(fq, pw, HR_LOW, HR_HIGH, harmonics=use_harmonics)
     agreement = sum(1 for b in method_bpm.values() if abs(b - f0 * 60.0) <= AGREE_BPM)
@@ -447,6 +474,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         "patch_snr": patch_snr,
         "patch_weight": {n: w / total_weight for n, w in patch_weight.items()},
         "background_used": background_band is not None,
+        "source": "face" if face is not None else "patches",   # where the pulse signal came from
         "motion_patches": motion_patches,    # how many patches needed motion correction
         "method_bpm": method_bpm,            # each method's own peak (cross-check)
         "agreement": agreement,              # how many of POS / CHROM / green agree with "bpm" (1-3)

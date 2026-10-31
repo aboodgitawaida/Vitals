@@ -16,8 +16,8 @@ from collections import deque
 
 import numpy as np
 
-from face_layout import PATCHES, REGIONS, assess_lighting, patch_region
-from vitals_dsp import HR_HIGH, HR_LOW, analyze_heart_rate
+from face_layout import REGIONS, TRACES, assess_lighting, patch_region
+from vitals_dsp import GREEN_MARGIN_DB, HR_HIGH, HR_LOW, analyze_heart_rate
 from vitals_stream import HeartRateTracker, SampleBuffer
 
 # ---------------- Settings you can tune (shared with vitals_app.py) ----------------
@@ -57,7 +57,7 @@ class LiveSession:
         self.use_motion = use_motion
         self.method = "auto"
         self.use_background = True
-        self.buffer = SampleBuffer(PATCHES, WINDOW_SEC, FACE_GAP_SEC)   # rolling per-patch colours
+        self.buffer = SampleBuffer(TRACES, WINDOW_SEC, FACE_GAP_SEC)    # rolling face and patch colours
         self.tracker = HeartRateTracker()                               # decides what number to show
         self.trend = deque()                     # (time, bpm or None) for the trend chart
         self.talking_level = deque(maxlen=30)    # mouth opening over the last ~1 s
@@ -128,7 +128,7 @@ class LiveSession:
         elif analyze and now - self.last_update >= UPDATE_EVERY:
             self.lighting = assess_lighting(stats, fps)
             # If the head moved at all during this window, make green prove itself (see vitals_dsp).
-            margin = 3.0 if now - self.last_small_motion < WINDOW_SEC else 0.0
+            margin = GREEN_MARGIN_DB + (3.0 if now - self.last_small_motion < WINDOW_SEC else 0.0)
             times, traces, background = self.buffer.arrays()
             a = analyze_heart_rate(
                 times, traces, background, method=self.method, prev_bpm=self.reading.prior_bpm,

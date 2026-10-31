@@ -41,12 +41,13 @@ import os
 import cv2
 import numpy as np
 
-from face_regions import PATCHES
+from face_regions import TRACES
 from frame_features import FeatureExtractor
 from vitals_dsp import HR_HIGH, HR_LOW, analyze_heart_rate, bandpass, pick_peak, power_spectrum, resample_uniform
 from vitals_stream import HeartRateTracker, simulate_display
 
 WINDOW_SEC, STEP_SEC = 15.0, 1.0
+CACHE_VERSION = 2          # bump when the per-frame features change (2: whole-face colour added)
 VIDEO_EXT = (".avi", ".mp4", ".mov", ".mkv", ".m4v", ".webm")
 
 
@@ -104,16 +105,18 @@ def make_face_mesh():
 
 def extract_features(video_path, face_mesh=None, cache_dir="eval_cache", process_width=640):
     """
-    Returns dict: t (N,), patches {name: (N,3)}, background (N,3), face (N,), moving (N,), pose (N,5).
+    Returns dict: t (N,), patches {trace name: (N,3)} (the 16 patches and the whole face),
+    background (N,3), face (N,), moving (N,), pose (N,5).
     Times come from the video's frame rate, not the wall clock.
     """
     cache = None
     if cache_dir:
-        key = hashlib.sha1(f"{os.path.abspath(video_path)}:{os.path.getsize(video_path)}".encode()).hexdigest()[:16]
+        key = hashlib.sha1(f"{os.path.abspath(video_path)}:{os.path.getsize(video_path)}:{CACHE_VERSION}"
+                           .encode()).hexdigest()[:16]
         cache = os.path.join(cache_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}_{key}.npz")
     if cache and os.path.exists(cache):
         d = np.load(cache)
-        return {"t": d["t"], "patches": {n: d[f"p_{n}"] for n in PATCHES}, "background": d["background"],
+        return {"t": d["t"], "patches": {n: d[f"p_{n}"] for n in TRACES}, "background": d["background"],
                 "face": d["face"], "moving": d["moving"], "pose": d["pose"]}
 
     face_mesh = face_mesh or make_face_mesh()
@@ -121,7 +124,7 @@ def extract_features(video_path, face_mesh=None, cache_dir="eval_cache", process
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     fx = FeatureExtractor()
     t, face, moving, bg, pose = [], [], [], [], []
-    patches = {n: [] for n in PATCHES}
+    patches = {n: [] for n in TRACES}
     missing = np.full(3, np.nan)
     i = 0
     while True:
@@ -137,7 +140,7 @@ def extract_features(video_path, face_mesh=None, cache_dir="eval_cache", process
         moving.append(ff.fast_motion)
         bg.append(missing if ff.bg_rgb is None else ff.bg_rgb)
         pose.append(np.full(5, np.nan) if ff.pose is None else ff.pose)
-        for n in PATCHES:
+        for n in TRACES:
             c = ff.colors.get(n) if ff.face else None
             patches[n].append(missing if c is None else c)
         i += 1
