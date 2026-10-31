@@ -1,0 +1,11 @@
+# Lint settings (the project is a set of scripts, not an installable package).
+[tool.ruff]
+line-length = 135          # a few long lines print aligned results tables
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+    "B905",                # zip() without strict=: lengths are checked where it matters
+    "E731",                # small named lambdas are used for readability
+]

@@ -12,7 +12,7 @@ def test_challenge_is_random_and_well_formed():
     a = make_challenge(np.random.default_rng(1))
     b = make_challenge(np.random.default_rng(2))
     assert [s[2] for s in a] != [s[2] for s in b]                       # unpredictable
-    for (s0, e0, c0), (s1, e1, c1) in zip(a, a[1:]):
+    for (_, e0, c0), (s1, _, c1) in zip(a, a[1:]):
         assert c0 != c1 and abs(e0 - s1) < 1e-9                         # every boundary is a real change
     assert all(SEGMENT_SEC[0] - 1e-9 <= e - s <= SEGMENT_SEC[1] + 1e-9 for s, e, _ in a[:-1])
     assert a[-1][1] == CHALLENGE_SEC

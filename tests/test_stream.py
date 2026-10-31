@@ -172,3 +172,16 @@ def test_buffer_stores_pose():
     buf.add(0.1, *frame())
     p = buf.pose_array()
     assert p.shape == (2, 4) and np.isnan(p[1]).all()
+
+
+def test_unusable_and_disagreeing_windows_are_ignored():
+    """Motion (usable=False) and a lone method (agreement 1/3) must not start or feed a reading."""
+    for kwargs in (dict(usable=False), dict(agreement=1)):
+        tr = HeartRateTracker()
+        for k in range(20):
+            reading = tr.update(10.0 + 0.5 * k, 72.0, 8.0, window_sec=15.0, **kwargs)
+        assert reading.bpm is None, kwargs
+    tr = HeartRateTracker()
+    for k in range(20):
+        reading = tr.update(10.0 + 0.5 * k, 72.0, 8.0, window_sec=15.0, agreement=2)
+    assert reading.bpm == 72.0

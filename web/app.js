@@ -247,7 +247,11 @@ function scheduleFrame() {
 
 function onFrame(_ts, video) {
   if (!state.running) return;
-  const now = (performance.now() - state.t0) / 1000;
+  // When the camera captured this frame, not when we got round to it: processing delays would
+  // otherwise jitter every sample's time. (Falls back to presentation time, then to now.)
+  const stamp = video?.captureTime ?? video?.presentationTime ?? performance.now();
+  const now = (stamp - state.t0) / 1000;
+  if (state.lastFrame !== null && now <= state.lastFrame) { scheduleFrame(); return; }   // same frame again
   // The camera's own frame rate (frames it delivered, processed or not): this is what drops in
   // low light. Without requestVideoFrameCallback, fall back to the processing rate.
   const presented = video?.presentedFrames;
@@ -374,6 +378,17 @@ function drawView(ff) {
   ctx.fillStyle = "rgba(230,230,230,0.9)";
   ctx.font = "12px system-ui, sans-serif";
   ctx.lineWidth = 1;
+  // The area the heart rate is measured on: the whole face (eyes, brows and lips are left out).
+  const lm = state.extractor.smooth;
+  if (lm) {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    state.cfg.FACE_OVAL.forEach((i, n) => (n ? ctx.lineTo : ctx.moveTo).call(ctx, lm[i][0] * k, lm[i][1] * k));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
   for (const [x0, y0, x1, y1] of ff.overlay.bg_boxes) {
     ctx.strokeRect(x0 * k + 0.5, y0 * k + 0.5, (x1 - x0) * k, (y1 - y0) * k);
     ctx.fillText("bg ref", x0 * k + 5, y0 * k + 15);
@@ -392,8 +407,8 @@ function renderDashboard(info) {
   $("lighting").textContent = info.lighting[1];
   $("lighting").dataset.level = info.lighting[0];
   $("status").textContent = info.status;
-  $("features").textContent = `bg ${info.use_background ? "ON" : "OFF"} · motion ` +
-    (info.motion_patches === null ? "-" : `${info.motion_patches}/${state.cfg.PATCHES.length}`);
+  $("features").textContent = `bg ${info.use_background ? "ON" : "OFF"}` +
+    (info.source ? ` · pulse: ${info.source === "face" ? "whole face" : "patches"}` : "");
   renderRegions(info.regions);
   drawSpectrum(info);
   drawLine($("pulse"), info.pulse);
@@ -402,7 +417,7 @@ function renderDashboard(info) {
 
 function renderRegions(regions) {
   const el = $("regions");
-  el.replaceChildren(...Object.entries(regions).map(([name, [snr, share]]) => {
+  el.replaceChildren(...Object.entries(regions).map(([name, [snr]]) => {
     const row = document.createElement("div");
     row.className = "region";
     const label = document.createElement("span");
@@ -418,7 +433,7 @@ function renderRegions(regions) {
     } else {
       fill.style.width = `${Math.max(0, Math.min(1, (snr + 6) / 15)) * 100}%`;
       fill.style.background = cssVar(`--${snrLevel(snr)}`);
-      num.textContent = `${snr >= 0 ? "+" : ""}${snr.toFixed(1)}  ${Math.round(share * 100)}%`;
+      num.textContent = `${snr >= 0 ? "+" : ""}${snr.toFixed(1)} dB`;
     }
     bar.append(fill);
     row.append(label, bar, num);
