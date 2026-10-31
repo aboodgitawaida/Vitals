@@ -16,11 +16,28 @@ REGIONS = {
     "left cheek": [50, 101, 118, 117, 116, 123, 187, 205, 36],
     "right cheek": [280, 330, 347, 346, 345, 352, 411, 425, 266],
 }
+# The whole face, for the heart-rate signal: the face outline minus eyes with brows, and lips.
+# Measured on real recordings (MCD-rPPG), one big region gives a much cleaner pulse than the
+# 16 small patches: on a small face each patch averages few pixels, and its edges move with
+# every pixel of landmark jitter. The patches are still measured, for the on-screen SNR map.
+FACE_TRACE = "face"
+FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400,
+             377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+FACE_EXCLUDE = [
+    [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,    # left eye
+     70, 63, 105, 66, 107, 55, 65, 52, 53, 46],                                      # + brow
+    [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466,  # right eye
+     300, 293, 334, 296, 336, 285, 295, 282, 283, 276],                               # + brow
+    [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185],  # lips
+]
+MIN_FACE_PIXELS = 200     # fewer usable face pixels -> no face colour this frame
+
 # Each region is split into a grid of patches: (columns, rows).
 GRID = {"forehead": (4, 2), "left cheek": (2, 2), "right cheek": (2, 2)}
 
 PATCHES = [f"{region.replace(' ', '_')}_p{i}"
            for region, (cols, rows) in GRID.items() for i in range(cols * rows)]
+TRACES = PATCHES + [FACE_TRACE]      # every colour trace kept per frame
 
 MIN_PATCH_PIXELS = 25     # fewer usable pixels -> patch counts as missing this frame
 DARK_FRACTION = 0.6       # darker than 60% of the region's median brightness -> dropped (hair, brows, shadow)
@@ -75,7 +92,8 @@ def snr_level(snr):
 def layout_config():
     """The settings the browser's colour measurement needs (web/features.js), as plain data."""
     keys = ("REGIONS", "GRID", "PATCHES", "MIN_PATCH_PIXELS", "DARK_FRACTION", "CLIP_LEVEL",
-            "MOTION_LIMIT", "SMALL_MOTION", "SMOOTHING")
+            "MOTION_LIMIT", "SMALL_MOTION", "SMOOTHING", "FACE_TRACE", "FACE_OVAL", "FACE_EXCLUDE",
+            "MIN_FACE_PIXELS")
     return {k: globals()[k] for k in keys}
 
 

@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import face_layout
-from face_layout import PATCHES
+from face_layout import FACE_TRACE, PATCHES
 from frame_features import FeatureExtractor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,13 +82,14 @@ def test_js_features_match_python():
         assert j["fast_motion"] == p.fast_motion
         assert j["movement"] == pytest.approx(p.movement, rel=1e-4, abs=1e-6)
         assert np.allclose(j["pose"], p.pose, rtol=1e-4, atol=1e-6)
-        for n in PATCHES:
+        for n in PATCHES + [FACE_TRACE]:
             a, b = j["colors"][n], p.colors[n]
             assert (a is None) == (b is None), n
             if a is not None:
-                # Polygon edges are rasterised slightly differently from OpenCV: a few
-                # edge pixels differ, so the means agree to ~0.1 of 255 but not to the bit.
-                assert np.allclose(a, b, atol=0.3), (n, a, b)
+                # Patch edges are rasterised slightly differently from OpenCV: a few edge
+                # pixels differ, so the means agree to ~0.1 of 255 but not to the bit. The
+                # face uses the same scanline fill on both sides (face_regions.fill_convex).
+                assert np.allclose(a, b, atol=1e-6 if n == FACE_TRACE else 0.3), (n, a, b)
                 compared += 1
         if p.bg_rgb is None:
             assert j["bg_rgb"] is None
