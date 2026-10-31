@@ -163,20 +163,6 @@ WINDOW_METHODS = {          # name: analyze_heart_rate settings
 }
 
 
-def _extract_one(video):
-    """Worker for --jobs: one FaceMesh per process; the result goes to the feature cache."""
-    extract_features(video)
-    return video
-
-
-def extract_in_parallel(videos, jobs):
-    """Fill the feature cache using several processes (FaceMesh is the slow part)."""
-    from multiprocessing import get_context
-    with get_context("spawn").Pool(jobs) as pool:
-        for i, video in enumerate(pool.imap_unordered(_extract_one, videos), 1):
-            print(f"   features ready {i}/{len(videos)}: {video}", flush=True)
-
-
 def evaluate_subject(feats, ref_fn):
     """
     ref_fn(t_end) -> reference BPM for the window ending at t_end, or None.
@@ -201,6 +187,30 @@ def evaluate_subject(feats, ref_fn):
     screen = [(now, b, ref_fn(now)) for now, b, _ in shown if now - t[0] >= 8.0]
     screen = [s for s in screen if s[2] is not None]
     return {"windows": windows, "screen": screen}
+
+
+def score_video(job):
+    """(name, video, ground truth or None, constant reference or None) -> (name, evaluate_subject result).
+    A top-level function so --jobs can run it in worker processes."""
+    name, video, gt, ref_bpm = job
+    if gt:
+        gt_t, gt_ppg, _ = read_ground_truth(gt)
+        ref_fn = lambda te: reference_bpm(gt_t, gt_ppg, te)
+    else:
+        ref_fn = lambda te: ref_bpm
+    return name, evaluate_subject(extract_features(video), ref_fn)
+
+
+def score_all(jobs, workers):
+    """Yield (name, result) in input order, using several processes if workers > 1 (FaceMesh is slow)."""
+    if workers <= 1:
+        for job in jobs:
+            print(f"{job[0]}: analysing {job[1]} ...", flush=True)
+            yield score_video(job)
+        return
+    from multiprocessing import get_context
+    with get_context("spawn").Pool(workers) as pool:
+        yield from pool.imap(score_video, jobs)
 
 
 def metrics(pairs):
@@ -243,33 +253,27 @@ def main():
     ap.add_argument("paths", nargs="+", help="videos, subject folders or a dataset folder")
     ap.add_argument("--ref-bpm", type=float, help="constant reference heart rate for plain videos")
     ap.add_argument("--out", default="eval_results", help="folder for the plot and tables")
-    ap.add_argument("--jobs", type=int, default=1, help="videos to process at the same time")
+    ap.add_argument("--jobs", type=int, default=1, help="videos to analyse at the same time (processes)")
     args = ap.parse_args()
 
     subjects = find_subjects(args.paths)
     if not subjects:
         raise SystemExit("No videos found.")
-    if args.jobs > 1:
-        extract_in_parallel([v for _, v, _ in subjects], args.jobs)
+    jobs = []
+    for name, video, gt in subjects:
+        if gt or args.ref_bpm:
+            jobs.append((name, video, gt, args.ref_bpm))
+        else:
+            print(f"skip {name}: no ground_truth.txt and no --ref-bpm")
     os.makedirs(args.out, exist_ok=True)
     all_windows = {m: [] for m in WINDOW_METHODS}
     all_screen, rows, groups = [], [], {}
-    for name, video, gt in subjects:
-        if gt:
-            gt_t, gt_ppg, _ = read_ground_truth(gt)
-            ref_fn = lambda te, gt_t=gt_t, gt_ppg=gt_ppg: reference_bpm(gt_t, gt_ppg, te)
-        elif args.ref_bpm:
-            ref_fn = lambda te: args.ref_bpm
-        else:
-            print(f"skip {name}: no ground_truth.txt and no --ref-bpm")
-            continue
-        print(f"{name}: extracting features from {video} ...", flush=True)
-        feats = extract_features(video)
-        res = evaluate_subject(feats, ref_fn)
+    for name, res in score_all(jobs, args.jobs):
         m_all = metrics([(e, r) for _, e, r in res["windows"]["full pipeline (auto)"]])
         m_scr = metrics([(e, r) for _, e, r in res["screen"]])
         cov = np.mean([e is not None for _, e, _ in res["screen"]]) if res["screen"] else np.nan
-        print(f"   windows MAE {m_all['MAE']:.1f} BPM | on screen: coverage {cov:.0%}, MAE {m_scr['MAE']:.1f} BPM")
+        print(f"{name}: windows MAE {m_all['MAE']:.1f} BPM | on screen: coverage {cov:.0%}, "
+              f"MAE {m_scr['MAE']:.1f} BPM", flush=True)
         rows.append((name, m_all, m_scr, cov))
         for m in WINDOW_METHODS:
             all_windows[m] += [(e, r) for _, e, r in res["windows"][m]]
