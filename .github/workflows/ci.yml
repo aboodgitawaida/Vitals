@@ -18,6 +18,8 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Every file compiles
         run: python -m py_compile *.py
+      - name: Lint
+        run: ruff check .
       - name: Unit and end-to-end tests
         run: python -m pytest -q tests
       - name: Web version builds

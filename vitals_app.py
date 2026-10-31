@@ -27,7 +27,6 @@ device. All processing happens locally; no video is saved or uploaded.
 
 import argparse
 import csv
-import math
 import os
 import time
 from collections import deque
@@ -39,9 +38,9 @@ import numpy as np
 from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
 from face_regions import PATCHES, TRACES, assess_lighting, draw_overlay
-from frame_features import MOTION_LIMIT, SMALL_MOTION, FeatureExtractor
+from frame_features import FeatureExtractor
 from liveness import CHALLENGE_SEC, LivenessSession
-from vitals_dsp import GREEN_MARGIN_DB, analyze_heart_rate
+from vitals_dsp import GREEN_MARGIN_DB
 from vitals_stream import POSE_FIELDS, HeartRateTracker, SampleBuffer
 # Settings shared with the browser version (web/) live in live_session.py.
 from live_session import (FACE_GAP_SEC, METHODS, MIN_SEC, MOTION_HOLD, SNR_GOOD_DB, TALKING_STD,
@@ -157,7 +156,6 @@ def main():
         analysis, reading = None, tracker.reading(0.0)
 
     while True:
-        frame_start = time.perf_counter()
         with timer.stage("camera"):
             ok, frame = cap.read()
         if not ok:

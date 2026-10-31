@@ -112,7 +112,7 @@
       </section>
 
       <section class="panel">
-        <div class="label row">REGIONS <span class="muted">SNR | weight</span><span id="features" class="muted right"></span></div>
+        <div class="label row">SNR MAP<span id="features" class="muted right"></span></div>
         <div id="regions"></div>
       </section>
 
@@ -120,15 +120,16 @@
         <div class="label">PULSE SPECTRUM</div>
         <canvas id="spectrum" class="chart"></canvas>
       </section>
+
+      <section class="panel">
+        <div class="label">HEART RATE TREND (60 s)</div>
+        <canvas id="trend" class="chart"></canvas>
+      </section>
     </aside>
 
     <section class="panel wide">
       <div class="label">PULSE WAVEFORM</div>
       <canvas id="pulse" class="chart"></canvas>
-    </section>
-    <section class="panel wide">
-      <div class="label">HEART RATE TREND (60 s)</div>
-      <canvas id="trend" class="chart"></canvas>
     </section>
 
     <nav class="controls" aria-label="Controls">
