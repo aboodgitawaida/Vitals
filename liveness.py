@@ -378,7 +378,6 @@ class LivenessSession:
 
     def progress_text(self, now):
         if self.phase == "pulse":
-            look = self.progress.next_look() or 30.0
             return (f"Step 1/2: hold still, finding your pulse... {now - self.started:4.1f} s "
                     f"(up to {ProgressivePulse.LOOKS[-1]:.0f} s)")
         if self.phase == "flash":

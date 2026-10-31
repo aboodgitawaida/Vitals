@@ -11,7 +11,10 @@
 
 [**Try it live →**](https://vitals-track.vercel.app)
 
-<a href="https://vitals-track.vercel.app"><img src="web/og.png" alt="Vitals: heart rate from an ordinary webcam" width="720"></a>
+<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard finding a heart rate of 69-74 BPM in a real recording" width="820"></a>
+
+<sub>The web app reading a real recording from the MCD-rPPG dataset through a virtual camera:
+69-74 BPM; the finger pulse sensor read 73-77. Dashed line: the skin it measures. Face blurred for privacy.</sub>
 
 </div>
 
@@ -20,27 +23,17 @@ far too little to see. Vitals tracks your face, measures that colour across
 the skin of the whole face, removes what room light explains, and recovers your
 pulse. This technique is called **remote photoplethysmography (rPPG)**.
 
-There are two front ends over one signal-processing core:
+## At a glance
 
-* **Web app** ([vitals-track.vercel.app](https://vitals-track.vercel.app)):
-  face tracking in JavaScript, and the project's **own Python analysis running
-  unchanged in the browser** through Pyodide (WebAssembly). No server, no uploads.
-* **Desktop app** (`vitals_app.py`): OpenCV dashboard with recording, replay
-  and a liveness-check prototype.
-
-**Tested on real people:** on held-out recordings from the public
-[MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg) dataset, 65% of the
-readings Vitals shows are within 5 BPM of a finger pulse sensor (average error 8.4 BPM).
-On 7 of 32 test recordings it averages within 1 BPM; on about half it is still off by
-more than 10 BPM per window, and the display hides many of those readings rather than
-fixing them. Evaluating on real data led to a redesign that cut the per-window error by
-about 30% on the development set and 20% on the test set; the numbers, what changed and
-what is still wrong are in [Validation](#validation).
+| | |
+| --- | --- |
+| **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
+| **How** | MediaPipe face tracking in JavaScript; the project's own Python signal processing runs unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
+| **Accuracy** | Tested against a finger pulse sensor on 32 held-out recordings of 16 people ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): 67% of the readings it shows are within 5 BPM (average error 7.1 BPM). Strongly depends on light: 30% of windows within 5 BPM in dim recordings, 72% in bright ones. [Details](#validation) |
+| **Engineering** | One codebase, two runtimes; a test that the JavaScript and Python measure exactly the same pixels; 82 tests and a linter in CI; a reproducible evaluation with separate development and test sets. |
+| **Honesty** | Shows "--" instead of guessing, publishes its failure cases, and explains what it deliberately does not measure. |
 
 > Not a medical device. Not for health, stress or diagnostic use.
-
-<p align="center"><img src="web/screenshot.png" alt="The Vitals dashboard measuring a heart rate of 74 BPM from a dataset video (face blurred)" width="860"><br>
-<sub>The web app reading a real recording through a virtual camera: 74 BPM, finger sensor 73-77 BPM. Face blurred; video from MCD-rPPG (CC BY 4.0).</sub></p>
 
 ## Highlights
 
@@ -50,26 +43,25 @@ what is still wrong are in [Validation](#validation).
   only those. scipy is replaced in the browser by `signal_lite.py` (numpy-only
   Butterworth, filtfilt and detrend, verified against scipy in tests), which
   halves the download.
-* **Signal processing driven by real data.** The pulse is measured on the
-  whole face, with room-light changes removed using the background wall as a
-  reference, and three rPPG methods (POS, CHROM, green) must agree before a
-  number is trusted. Evaluating on real recordings changed the design: see
+* **Design driven by real data.** The first evaluation on real recordings was
+  far worse than simulation suggested. Diagnosing it led to measuring the
+  whole face instead of 16 small patches, dropping a motion correction that
+  removed pulse, and preferring POS: about 30% lower error on the
+  development set, 20% on the held-out test set. See
   [What real data changed](#what-real-data-changed).
 * **Honest by design.** A tracker (acquiring / locked / holding / lost) shows
-  "--" instead of guessing when the signal is weak. The README documents the
-  skin-tone gap and what the project deliberately does **not** measure.
+  "--" instead of guessing when the signal is weak, and three rPPG methods
+  (POS, CHROM, green) must agree before a number is trusted. No brightness
+  cut-off is used even though dim recordings are less accurate, because face
+  brightness also depends on skin tone.
 * **Fast first reading.** The camera and face tracking start before Python has
   loaded, and measured frames are queued and analysed when it is ready. First
   visit at 20 Mbit/s: camera in ~4 s, first heart rate in ~12 s.
-* **Evaluated on real data, with a held-out test set.** A reproducible
-  evaluation on random samples of a public research dataset (see
-  [Validation](#validation)): standard rPPG metrics (MAE, RMSE, Pearson r,
-  Bland-Altman), a development set used to fix the method and a separate test
-  set used only to report it, a comparison with the published baseline, and
-  the failure cases.
-* **Tested.** 81 unit and end-to-end tests run in GitHub Actions on every push,
-  including a check that the JavaScript colour measurement matches the Python
-  one and simulated 2-minute sessions that test what the screen actually shows.
+* **Tested.** 82 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
+  including JavaScript/Python parity of the colour measurement and simulated
+  2-minute sessions that test what the screen actually shows.
+  `tests/browser_check.mjs` runs the real web app in headless Chromium on a
+  dataset video.
 * **Private.** Video never leaves the device. Recordings store per-frame
   average colours only, never images.
 
@@ -113,7 +105,7 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
 | Signal processing | Python, NumPy, SciPy (desktop) / `signal_lite.py` (browser) |
 | Computer vision | MediaPipe Face Landmarker (web), MediaPipe FaceMesh + OpenCV (desktop) |
 | Web | Vanilla JavaScript (ES modules), Web Workers, Pyodide, Canvas 2D, no framework |
-| Testing and CI | pytest, Node (JS/Python parity test), GitHub Actions |
+| Testing and CI | pytest, ruff, Node (JS/Python parity test), Playwright (browser check), GitHub Actions |
 | Hosting | Vercel (static build: `node web/build.mjs`) |
 
 ## Run it
@@ -155,6 +147,7 @@ your face), `r` patch SNR map, `p` performance readout, `s` start/stop recording
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest -q tests
+ruff check .
 
 python replay.py recordings/session_YYYYMMDD_HHMMSS.csv --ref 72   # 72 = your watch's BPM
 python session_benchmark.py              # simulated sessions: v3 vs v4 vs v5, still and fidgeting
@@ -239,7 +232,7 @@ python evaluate_video.py mcd_test --jobs 4
 
 | Coverage (a number is shown) | MAE | RMSE | Pearson r | Within 5 BPM |
 | --- | --- | --- | --- | --- |
-| 50% | 8.4 BPM | 15.5 BPM | 0.48 | 65% |
+| 47% | 7.1 BPM | 13.3 BPM | 0.60 | 67% |
 
 **Every 15 s window, before and after the changes below** (no tracker, the
 usual way rPPG papers report):
@@ -252,6 +245,20 @@ usual way rPPG papers report):
 | test | **after (whole face)** | **10.89** | **18.20** | **0.34** | **54%** | **13 / 32** |
 
 <p align="center"><img src="docs/validation/bland_altman_test.png" alt="Bland-Altman plot of camera vs PPG sensor heart rate on the test set" width="620"></p>
+
+**Light matters most.** Test set, 15 s windows every 5 s, POS on the whole face,
+split by how bright the face is in the video:
+
+| Face brightness (of 255) | Windows | MAE (BPM) | Within 5 BPM |
+| --- | --- | --- | --- |
+| below 80 (dim) | 268 | 17.4 | 30% |
+| 80-95 | 391 | 9.6 | 49% |
+| 95 and above (bright) | 434 | 8.5 | 72% |
+
+The development set shows the same pattern. Vitals does **not** refuse to
+measure dim faces: face brightness depends on skin tone as well as on the
+room, so a brightness cut-off would turn away darker-skinned people in good
+light. It tells you when the light is dim instead.
 
 Full tables (every method, at rest vs after exercise) and per-recording
 results: [`docs/validation/`](docs/validation/). The reference heart rate is
@@ -279,6 +286,12 @@ it:
 4. **Too-dark patches are skipped.** One test-set person's forehead patches
    were nearly black (hair), and dividing by a near-zero colour crashed the
    analysis. Found by the held-out run, fixed, and covered by a test.
+5. **A tracker bug, found by a linter.** Two documented display rules, "pause
+   while the head moves" and "ignore an estimate unless 2 of the 3 methods
+   agree", had silently stopped working in a refactor (`usable` was set but
+   never read). Restoring them lowered the display's error from 8.4 to
+   7.1 BPM on the test set (6.6 on development) and raised its correlation
+   with the sensor from 0.48 to 0.60. A regression test now covers it.
 
 Things that did **not** help and were left out: a stricter tracker (it hid
 more readings, but the share of wrong ones stayed the same), penalising

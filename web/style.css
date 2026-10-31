@@ -110,11 +110,11 @@ button:disabled { opacity: 0.6; cursor: default; }
 }
 .perf:empty { display: none; }
 
-.side { display: flex; flex-direction: column; gap: 12px; }
+.side { display: flex; flex-direction: column; gap: 12px; grid-row: span 2; }
 .panel { background: var(--panel); border-radius: 12px; padding: 12px 14px; }
 .wide { grid-column: span 1; }
 .label { font-size: 12px; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
-.label.row { display: flex; gap: 8px; align-items: baseline; }
+.label.row { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; }
 
 .hr .value { display: flex; align-items: baseline; gap: 8px; color: var(--lvl, var(--none)); }
 #bpm { font-size: 72px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }

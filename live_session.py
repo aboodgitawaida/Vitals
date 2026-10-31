@@ -181,14 +181,14 @@ class LiveSession:
             "trend": [[float(t), _num(b)] for t, b in self.trend],
             "regions": {k: [_num(s), float(w)] for k, (s, w) in region_summary(a).items()},
             "snr_db": None, "method_used": None, "agreement": None, "peak_bpm": None,
-            "motion_patches": None, "patch_snr": {}, "spectrum": None, "pulse": None,
+            "motion_patches": None, "patch_snr": {}, "spectrum": None, "pulse": None, "source": None,
         }
         if a is not None:
             band = (a["freqs"] >= HR_LOW - 0.2) & (a["freqs"] <= HR_HIGH + 0.2)
             out.update({
                 "snr_db": _num(a["snr_db"]), "method_used": a["method_used"],
                 "agreement": int(a["agreement"]), "peak_bpm": _num(a["bpm"]),
-                "motion_patches": int(a["motion_patches"]),
+                "motion_patches": int(a["motion_patches"]), "source": a["source"],
                 "patch_snr": {k: _num(v) for k, v in a["patch_snr"].items()},
                 # Every 4th bin is plenty for a chart and keeps the message small.
                 "spectrum": [(a["freqs"][band][::4] * 60).tolist(), a["power"][band][::4].tolist()],
