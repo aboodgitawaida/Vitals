@@ -56,7 +56,8 @@ pulse. This technique is called **remote photoplethysmography (rPPG)**.
   brightness also depends on skin tone.
 * **Fast first reading.** The camera and face tracking start before Python has
   loaded, and measured frames are queued and analysed when it is ready. First
-  visit at 20 Mbit/s: camera in ~4 s, first heart rate in ~12 s.
+  visit at 20 Mbit/s: camera in ~4 s; the first heart rate typically follows
+  10-20 s later, once the signal passes the quality checks.
 * **Tested.** 82 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
   including JavaScript/Python parity of the colour measurement and simulated
   2-minute sessions that test what the screen actually shows.
@@ -181,7 +182,8 @@ node web/build.mjs && node tests/browser_check.mjs cam.y4m   # the web app, with
 | `replay.py` | Re-runs every configuration on a recording against a reference BPM |
 | `synthetic_benchmark.py` | Per-window ablation on simulated lighting scenarios |
 | `session_benchmark.py` | End-to-end test of what the screen shows on simulated 2-minute sessions |
-| `tests/` | Unit and end-to-end tests (run in CI on every push) |
+| `tests/` | Unit and end-to-end tests (run in CI on every push), `browser_check.mjs` for the web app |
+| `docs/` | Demo GIF and the published validation results |
 
 ## How the web version works
 
