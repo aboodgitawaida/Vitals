@@ -9,7 +9,9 @@
 //
 // Needs Playwright with Chromium (npm i playwright && npx playwright install chromium) and
 // internet access (MediaPipe and Pyodide load from CDNs). Chromium loops the video, so a
-// reading may drop briefly where the clip restarts.
+// reading may drop briefly where the clip restarts. Run it on an otherwise idle machine:
+// under heavy CPU load Chromium's fake camera can play the clip slower than real time,
+// which lowers every frequency, the heart rate included, by the same factor.
 
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";

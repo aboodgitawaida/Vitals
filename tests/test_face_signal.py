@@ -54,3 +54,14 @@ def test_pulse_comes_from_face_when_available():
     face_missing = face.copy()
     face_missing[: len(t) // 2] = np.nan                           # face colour mostly missing: use patches
     assert analyze_heart_rate(t, {**traces, FACE_TRACE: face_missing}, bg, patch_map=False)["source"] == "patches"
+
+
+def test_too_dark_patch_is_skipped_not_divided_by_zero():
+    t, traces, bg, true_bpm = make_trial("steady light", "lighter", np.random.default_rng(3))
+    traces = dict(traces)
+    dark = np.zeros_like(traces["forehead_p0"])
+    dark[:, 0] = 3.0                                   # black hair: red barely above 0, green and blue 0
+    traces["forehead_p0"] = dark
+    r = analyze_heart_rate(t, traces, bg)              # patch_map on: every patch is analysed
+    assert r["patch_snr"]["forehead_p0"] is None and "forehead_p0" not in r["patch_weight"]
+    assert abs(r["bpm"] - true_bpm) < 3

@@ -246,6 +246,8 @@ def chrom_pulse(rgb, fs=FS, win_sec=1.6):
     return h
 
 
+MIN_LEVEL = 2.0          # a colour channel averaging below this (of 255) is too dark to measure
+                         # (e.g. a forehead patch covered by black hair): skipped, not divided by ~0
 GREEN_MARGIN_DB = 6.0    # auto mode: green must beat POS by this much (dB) to be used. On real
                          # recordings green was rarely better and often fooled by noise.
 METHODS = {"pos": pos_pulse, "chrom": chrom_pulse, "green": lambda rgb, fs=FS: green_pulse(rgb)}
@@ -398,12 +400,14 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
 
     face = patch_traces.get(FACE_TRACE)
     face = None if face is None else _fill_missing(t, np.asarray(face, dtype=float))
+    if face is not None and (face.mean(axis=0) < MIN_LEVEL).any():
+        face = None
     pooled, total_weight, patch_snr, patch_weight = None, 0.0, {}, {}
     for name, rgb in patch_traces.items():
         if name == FACE_TRACE:
             continue
         rgb = _fill_missing(t, np.asarray(rgb, dtype=float))
-        if rgb is None:
+        if rgb is None or (rgb.mean(axis=0) < MIN_LEVEL).any():
             patch_snr[name] = None
             continue
         _, rgb_u = resample_uniform(t, rgb, fs)
