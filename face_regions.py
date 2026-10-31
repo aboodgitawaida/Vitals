@@ -7,11 +7,14 @@ skin regions with them, split each region into a grid of small patches, and
 drop pixels that clearly aren't usable skin (hair, eyebrows, shadow, glare).
 """
 
+import math
+
 import cv2
 import numpy as np
 
-from face_layout import (CLIP_LEVEL, DARK_FRACTION, GRID, MIN_PATCH_PIXELS, PATCHES,  # noqa: F401 (re-exported)
-                         REGIONS, assess_lighting, patch_region, snr_level)
+from face_layout import (CLIP_LEVEL, DARK_FRACTION, FACE_EXCLUDE, FACE_OVAL, GRID,  # noqa: F401 (re-exported)
+                         MIN_FACE_PIXELS, MIN_PATCH_PIXELS, PATCHES, REGIONS, TRACES, assess_lighting,
+                         patch_region, snr_level)
 
 
 def landmarks_to_array(face, w, h):
@@ -93,6 +96,58 @@ def extract_patch_colors(frame, landmarks):
 
     stats = {"luminance": lum_by_region, "clipped_fraction": clipped_total / max(total, 1)}
     return colors, patches, regions, stats
+
+
+def fill_convex(mask, hull, value):
+    """
+    Scanline fill of a convex polygon (integer vertices in order), boundary included.
+    The same arithmetic as fillConvex in web/features.js, so the browser and this
+    code measure exactly the same face pixels. (cv2.fillConvexPoly treats edge
+    pixels slightly differently, ~1% of a face.)
+    """
+    h, w = mask.shape
+    pts = [tuple(map(int, p)) for p in hull]
+    ys = [p[1] for p in pts]
+    for y in range(max(min(ys), 0), min(max(ys), h - 1) + 1):
+        xl, xr = math.inf, -math.inf
+        for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1]):
+            if ay <= y <= by or by <= y <= ay:
+                if ay == by:
+                    xl, xr = min(xl, ax, bx), max(xr, ax, bx)
+                else:
+                    x = ax + (y - ay) * (bx - ax) / (by - ay)
+                    xl, xr = min(xl, x), max(xr, x)
+        if xl > xr:
+            continue
+        x0, x1 = max(math.floor(xl + 0.5), 0), min(math.floor(xr + 0.5), w - 1)
+        if x0 <= x1:                                   # (a negative x1 must not wrap around)
+            mask[y, x0:x1 + 1] = value
+
+
+def face_color(frame, landmarks):
+    """
+    Mean RGB of the whole face (outline minus eyes with brows, and lips): the heart-rate signal.
+
+    No brightness filter here, unlike the patches: pixels that cross a threshold
+    from frame to frame add noise, and on a large region the few dark pixels
+    (nostrils, a strand of hair) barely move the mean. Saturated pixels (glare)
+    are still dropped. Returns RGB or None.
+    """
+    pts = landmarks[FACE_OVAL].astype(np.int32)
+    x, y = pts.min(axis=0)
+    w, h = pts.max(axis=0) - (x, y) + 1
+    x, y = max(x, 0), max(y, 0)
+    w, h = max(min(w, frame.shape[1] - x), 1), max(min(h, frame.shape[0] - y), 1)
+    mask = np.zeros((h, w), np.uint8)
+    fill_convex(mask, cv2.convexHull(pts - [x, y])[:, 0], 1)
+    for indices in FACE_EXCLUDE:
+        fill_convex(mask, cv2.convexHull(landmarks[indices].astype(np.int32) - [x, y])[:, 0], 0)
+    crop = frame[y:y + h, x:x + w]
+    mask[crop.max(axis=2) >= CLIP_LEVEL] = 0
+    if cv2.countNonZero(mask) < MIN_FACE_PIXELS:
+        return None
+    b, g, r, _ = cv2.mean(crop, mask=mask)
+    return np.array([r, g, b])
 
 
 def background_color(frame, landmarks):

@@ -38,10 +38,10 @@ import numpy as np
 
 from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
-from face_regions import PATCHES, assess_lighting, draw_overlay
+from face_regions import PATCHES, TRACES, assess_lighting, draw_overlay
 from frame_features import MOTION_LIMIT, SMALL_MOTION, FeatureExtractor
 from liveness import CHALLENGE_SEC, LivenessSession
-from vitals_dsp import analyze_heart_rate
+from vitals_dsp import GREEN_MARGIN_DB, analyze_heart_rate
 from vitals_stream import POSE_FIELDS, HeartRateTracker, SampleBuffer
 # Settings shared with the browser version (web/) live in live_session.py.
 from live_session import (FACE_GAP_SEC, METHODS, MIN_SEC, MOTION_HOLD, SNR_GOOD_DB, TALKING_STD,
@@ -133,7 +133,7 @@ def main():
         min_detection_confidence=0.5, min_tracking_confidence=0.5)
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
 
-    buffer = SampleBuffer(PATCHES, WINDOW_SEC, FACE_GAP_SEC)   # rolling per-patch colours
+    buffer = SampleBuffer(TRACES, WINDOW_SEC, FACE_GAP_SEC)    # rolling face and patch colours
     tracker = HeartRateTracker()                               # decides what number to show
     reading = tracker.reading(0.0)
     trend = deque()                                  # (time, bpm or None) for the 60 s trend
@@ -224,7 +224,7 @@ def main():
             elif now - last_update >= UPDATE_EVERY and not analyzer.busy():   # one job at a time
                 lighting = assess_lighting(stats, fps)
                 # If the head moved at all during this window, make green prove itself (see vitals_dsp).
-                margin = 3.0 if now - last_small_motion < WINDOW_SEC else 0.0
+                margin = GREEN_MARGIN_DB + (3.0 if now - last_small_motion < WINDOW_SEC else 0.0)
                 times, traces, background = buffer.arrays()   # a copy: safe to hand to the worker
                 submitted = analyzer.submit(
                     (now, have, moving),

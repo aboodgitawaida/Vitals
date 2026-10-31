@@ -7,7 +7,8 @@ Shared by the live app (vitals_app.py) and the offline video tools
 Per frame:
   * motion check (how far the nose moved, relative to face width)
   * landmark smoothing (FaceMesh jitters a pixel or two per frame)
-  * mean colour of the 16 skin patches and of the background wall
+  * mean colour of the whole face (the heart-rate signal), of the 16 skin
+    patches (the SNR map) and of the background wall
   * head pose for motion correction (x, y, scale, roll, mouth opening)
 """
 
@@ -16,8 +17,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from face_layout import MOTION_LIMIT, SMALL_MOTION, SMOOTHING  # noqa: F401 (re-exported)
-from face_regions import background_color, extract_patch_colors, landmarks_to_array
+from face_layout import FACE_TRACE, MOTION_LIMIT, SMALL_MOTION, SMOOTHING  # noqa: F401 (re-exported)
+from face_regions import background_color, extract_patch_colors, face_color, landmarks_to_array
 
 
 def head_pose(lm, w, h):
@@ -37,7 +38,7 @@ def head_pose(lm, w, h):
 @dataclass
 class FrameFeatures:
     face: bool                        # did FaceMesh find a face?
-    colors: dict = None               # {patch: RGB or None}
+    colors: dict = None               # {patch or FACE_TRACE: RGB or None}
     bg_rgb: np.ndarray = None         # wall colour, or None
     pose: np.ndarray = None           # head pose (POSE_FIELDS)
     movement: float = 0.0             # nose movement this frame / face width
@@ -77,6 +78,7 @@ class FeatureExtractor:
             self.smooth_lm = SMOOTHING * self.smooth_lm + (1 - SMOOTHING) * lm
 
         colors, patches, regions, stats = extract_patch_colors(frame_bgr, self.smooth_lm)
+        colors[FACE_TRACE] = face_color(frame_bgr, self.smooth_lm)
         bg_rgb, bg_boxes = background_color(frame_bgr, self.smooth_lm)
         return FrameFeatures(
             face=True, colors=colors, bg_rgb=bg_rgb,
