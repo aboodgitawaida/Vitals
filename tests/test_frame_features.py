@@ -19,7 +19,6 @@ def _face(shift=0.0, mouth=0.01):
 
 
 def test_head_pose_fields():
-    frame = np.full((360, 640, 3), 150, np.uint8)
     lm = np.array([[p.x * 640, p.y * 360] for p in _face(mouth=0.05).landmark])
     pose = head_pose(lm, 640, 360)
     assert len(pose) == len(POSE_FIELDS)

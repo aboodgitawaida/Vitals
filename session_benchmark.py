@@ -299,7 +299,7 @@ def calibrate(windows=600, seed=3):
     trk = HeartRateTracker()
     enter = keep = 0
     snrs = []
-    for k in range(windows):
+    for _ in range(windows):
         sess = make_session("medium", 1.1, rng, seconds=WINDOW_SEC + 0.5, pulse=False, events=False)
         t, patches, bg = sess["t"], sess["patches"], sess["background"]
         track = rng.uniform(55, 100)

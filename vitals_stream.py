@@ -278,7 +278,7 @@ class HeartRateTracker:
         if agreement is not None and agreement < self.MIN_AGREEMENT:
             usable = False                      # one method alone: not trusted
         has_track = self.track is not None and now - self.last_accept <= self.HOLD_SEC
-        if snr_db is not None:
+        if bpm is not None and snr_db is not None and usable:
             snr_db = snr_db - self.extra_db(window_sec)   # short window: same rules, higher bar
             if has_track:
                 near = abs(bpm - self.track) <= self.GATE_BPM

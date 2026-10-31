@@ -134,7 +134,8 @@ def main(trials=60, seed=11):
     print(f"{'scenario':<18}{'LIVE':>7}{'NOT LIVE':>10}{'NOT CONF.':>11}   {'pulse pass':>10}{'flash pass':>11}   should be")
     for sc in SCENARIOS:
         r = [x for x in res if x[0] == sc]
-        share = lambda v: np.mean([x[2] == v for x in r])
+        def share(v, r=r):
+            return np.mean([x[2] == v for x in r])
         expect = {"live, close": "LIVE", "live, far/bright": "LIVE or NOT CONFIRMED",
                   "printed photo": "never LIVE", "mask": "never LIVE", "phone replay": "NOT LIVE",
                   "virtual camera": "NOT LIVE", "live deepfake": "LIVE (blind spot)"}[sc]
