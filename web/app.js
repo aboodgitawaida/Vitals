@@ -18,6 +18,7 @@ const VIEW_WIDTH = 960;          // the on-screen copy (measurements use the ful
 const GAP_RESET_SEC = 1.0;       // no camera frames for this long (tab hidden): start over
 const SLOW_MESH_MS = 50;         // face tracking slower than this on "GPU": try CPU instead
 const HR_LOW_BPM = 42, HR_HIGH_BPM = 240;
+const SETTLE_CAMERA_MS = 2000;   // let auto exposure / white balance settle, then lock them
 const LEVEL_TEXT = { good: "GOOD SIGNAL", fair: "FAIR SIGNAL", none: "NO READING" };
 const TINT = { good: [110, 220, 120], fair: [250, 195, 60], none: [235, 110, 110] };
 const REJECTED = [170, 70, 200];  // hair, brows, shadow, glare: not used
@@ -119,6 +120,43 @@ async function startCamera() {
 
 function setLoad(text) { $("load-status").textContent = text; }
 
+// Webcams keep adjusting exposure and white balance, and every adjustment changes the skin's
+// colour far more than a heartbeat does. Once they have settled, freeze them at their current
+// values (where the camera allows it; many do in Chrome, some do not, and then nothing changes).
+async function setCameraAuto(auto) {
+  const track = state.stream?.getVideoTracks()[0];
+  if (!track?.getCapabilities) return false;
+  const caps = track.getCapabilities(), now = track.getSettings(), adv = {};
+  if (auto) {
+    if (caps.exposureMode?.includes("continuous")) adv.exposureMode = "continuous";
+    if (caps.whiteBalanceMode?.includes("continuous")) adv.whiteBalanceMode = "continuous";
+  } else {
+    if (caps.exposureMode?.includes("manual") && now.exposureTime) Object.assign(adv, { exposureMode: "manual", exposureTime: now.exposureTime });
+    if (caps.whiteBalanceMode?.includes("manual") && now.colorTemperature) Object.assign(adv, { whiteBalanceMode: "manual", colorTemperature: now.colorTemperature });
+  }
+  if (!Object.keys(adv).length) return false;
+  try {
+    await track.applyConstraints({ advanced: [adv] });
+    return true;
+  } catch (err) {
+    console.warn("camera settings not changed", err);
+    return false;
+  }
+}
+
+let lockTimer = null;
+function lockCameraSoon(restart = false) {
+  // (Re)lock after the camera has had time to adapt, e.g. at start or after Light mode changes.
+  // restart: the image changed a lot meanwhile, so analyse only what comes after the lock.
+  clearTimeout(lockTimer);
+  state.cameraLocked = false;
+  lockTimer = setTimeout(async () => {
+    if (!state.running) return;
+    state.cameraLocked = await setCameraAuto(false);
+    if (restart) { control("reset"); state.extractor?.reset(); }
+  }, SETTLE_CAMERA_MS);
+}
+
 // Face tracking and Python start downloading as soon as the page opens, while the
 // visitor reads the intro; the camera is only switched on when they click Start.
 let loading = null;
@@ -210,12 +248,14 @@ async function start() {
   console.log(`camera: ${w}x${h}`);
   state.running = true;
   state.t0 = performance.now();
+  lockCameraSoon();
   scheduleFrame();
 }
 
 function stop() {
   const wasRunning = state.running;
   state.running = false;
+  clearTimeout(lockTimer);
   state.stream?.getTracks().forEach((t) => t.stop());
   if (wasRunning) {                     // these came from the preload: load fresh ones for next time
     // The preloaded face tracker and worker are released through the preload (even if still
@@ -316,7 +356,7 @@ function renderPerf() {
   if (!state.showPerf) { el.textContent = ""; return; }
   const g = (k) => (state.perf[k] === undefined ? "-" : state.perf[k].toFixed(0));
   const work = ["grab", "mesh", "read", "patches", "draw"].reduce((a, k) => a + (state.perf[k] || 0), 0);
-  el.textContent = `${Math.round(state.fps)} fps (camera ${Math.round(state.camFps)}) | ${state.delegate} | work ${work.toFixed(0)} ms/frame (camera ${g("grab")}, ` +
+  el.textContent = `${Math.round(state.fps)} fps (camera ${Math.round(state.camFps)}, exposure ${state.cameraLocked ? "locked" : "auto"}) | ${state.delegate} | work ${work.toFixed(0)} ms/frame (camera ${g("grab")}, ` +
     `mesh ${g("mesh")}, pixels ${g("read")}, patches ${g("patches")}, draw ${g("draw")}) | analysis ${g("analysis")} ms`;
 }
 
@@ -398,7 +438,9 @@ function drawView(ff) {
 function renderDashboard(info) {
   $("bpm").textContent = info.bpm === null ? "--" : Math.round(info.bpm);
   document.querySelector(".hr").dataset.level = info.level;
-  $("level-text").textContent = info.state === "holding" ? "HOLDING (weak signal)" : LEVEL_TEXT[info.level];
+  document.querySelector(".hr").classList.toggle("settling", Boolean(info.settling));
+  $("level-text").textContent = info.state === "holding" ? "HOLDING (weak signal)"
+    : info.settling ? "SETTLING" : LEVEL_TEXT[info.level];
   const snr = info.snr_db === null ? "SNR --" : `SNR ${info.snr_db >= 0 ? "+" : ""}${info.snr_db.toFixed(1)} dB`;
   const used = (info.method_used || (info.method === "auto" ? "pos" : info.method)).toUpperCase();
   let method = info.method === "auto" ? `AUTO>${used}` : info.method.toUpperCase();
@@ -563,7 +605,8 @@ function setLight(on, fullscreen = true) {
     if (on && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
     if (!on && document.fullscreenElement) document.exitFullscreen().catch(() => {});
   }
-  // The camera re-adjusts exposure after a big lighting change; start fresh.
+  // The camera re-adjusts exposure after a big lighting change: let it, lock again, start fresh.
+  if (state.running) setCameraAuto(true).then(() => lockCameraSoon(true));
   control("reset");
   state.extractor?.reset();
   if (state.info) renderDashboard(state.info);

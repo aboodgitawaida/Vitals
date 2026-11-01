@@ -72,7 +72,9 @@ def test_first_reading_needs_confirmation():
     trk = HeartRateTracker()
     r = feed(trk, [(70, 5)] * 5)
     shown = [x.bpm is not None for x in r]
-    assert shown == [False, False, False, True, True]   # appears once it has persisted 1.5 s
+    first = int(np.ceil(trk.ACQUIRE_SEC / 0.5))           # windows are 0.5 s apart
+    assert first >= 1                                     # never on the very first window
+    assert shown == [False] * first + [True] * (5 - first)
     assert r[-1].state == "locked"
 
 
@@ -94,7 +96,8 @@ def test_weak_window_near_track_is_kept_far_one_is_not():
 def test_weak_windows_alone_cannot_keep_a_reading_alive():
     trk = HeartRateTracker()
     feed(trk, [(70, 5)] * 4)                          # last strong window at t = 1.5
-    r = feed(trk, [(70, -1.0)] * 30, start=2.0)       # weak but agreeing, forever
+    weak = (trk.SNR_ENTER + trk.SNR_KEEP) / 2             # above KEEP, below ENTER
+    r = feed(trk, [(70, weak)] * 30, start=2.0)       # weak but agreeing, forever
     last_shown = max(x for x, rd in zip(np.arange(2.0, 17.0, 0.5), r) if rd.bpm is not None)
     assert last_shown <= 1.5 + trk.REFRESH_SEC + trk.HOLD_SEC + 1e-9
     assert r[-1].state == "lost"
@@ -155,13 +158,14 @@ def test_simulated_session_locks_near_truth():
 
 
 def test_short_windows_need_a_higher_snr():
-    trk = HeartRateTracker()
-    assert trk.extra_db(5.0) == trk.SHORT_WINDOW_EXTRA_DB
+    trk = HeartRateTracker(SHORT_WINDOW_EXTRA_DB=1.0)     # off by default (real data), the rule still works
+    assert trk.extra_db(5.0) == 1.0
     assert trk.extra_db(15.0) == 0.0 and trk.extra_db(None) == 0.0
-    # 0.5 dB is enough for a full window but not for a 5 s one
-    full = feed(HeartRateTracker(), [(70, 0.5)] * 5)
-    t5 = HeartRateTracker()
-    short = [t5.update(k * 0.5, 70, 0.5, window_sec=5.0) for k in range(5)]
+    # just above the bar is enough for a full window but not for a 5 s one
+    snr = trk.SNR_ENTER + 0.5
+    full = feed(HeartRateTracker(SHORT_WINDOW_EXTRA_DB=1.0), [(70, snr)] * 5)
+    t5 = HeartRateTracker(SHORT_WINDOW_EXTRA_DB=1.0)
+    short = [t5.update(k * 0.5, 70, snr, window_sec=5.0) for k in range(5)]
     assert full[-1].bpm is not None and short[-1].bpm is None
 
 
@@ -185,3 +189,11 @@ def test_unusable_and_disagreeing_windows_are_ignored():
     for k in range(20):
         reading = tr.update(10.0 + 0.5 * k, 72.0, 8.0, window_sec=15.0, agreement=2)
     assert reading.bpm == 72.0
+
+
+def test_new_reading_is_settling_then_steady():
+    trk = HeartRateTracker()
+    times = np.arange(0.0, 12.0, 0.5)
+    settling = [trk.settling(t) for t in times if trk.update(t, 70.0, 5.0).bpm is not None]
+    assert settling[0] and not settling[-1]
+    assert sum(settling) == int(trk.SETTLE_SEC / 0.5)          # settling for SETTLE_SEC, then steady
