@@ -29,7 +29,7 @@ pulse. This technique is called **remote photoplethysmography (rPPG)**.
 | --- | --- |
 | **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
 | **How** | MediaPipe face tracking in JavaScript; the project's own Python signal processing runs unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
-| **Accuracy** | Tested against a finger pulse sensor on 32 held-out recordings of 16 people ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): 67% of the readings it shows are within 5 BPM (average error 7.1 BPM). Strongly depends on light: 30% of windows within 5 BPM in dim recordings, 72% in bright ones. [Details](#validation) |
+| **Accuracy** | Tested against a finger pulse sensor on 32 held-out recordings of 16 people ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): 68% of the steady readings it shows are within 5 BPM (average error 6.7 BPM), and a first, provisional reading appears after a median of 10.5 s. Strongly depends on light: 30% of windows within 5 BPM in dim recordings, 72% in bright ones. [Details](#validation) |
 | **Engineering** | One codebase, two runtimes; a test that the JavaScript and Python measure exactly the same pixels; 82 tests and a linter in CI; a reproducible evaluation with separate development and test sets. |
 | **Honesty** | Shows "--" instead of guessing, publishes its failure cases, and explains what it deliberately does not measure. |
 
@@ -55,9 +55,10 @@ pulse. This technique is called **remote photoplethysmography (rPPG)**.
   cut-off is used even though dim recordings are less accurate, because face
   brightness also depends on skin tone.
 * **Fast first reading.** The camera and face tracking start before Python has
-  loaded, and measured frames are queued and analysed when it is ready. First
-  visit at 20 Mbit/s: camera in ~4 s; the first heart rate typically follows
-  10-20 s later, once the signal passes the quality checks.
+  loaded, and measured frames are queued and analysed when it is ready. A
+  first number appears after a median of 10.5 s of face time (it was 15 s),
+  shown dimmed as "settling" until it has lasted 6 s and passed a stricter
+  check; steady numbers are as accurate as before.
 * **Tested.** 82 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
   including JavaScript/Python parity of the colour measurement and simulated
   2-minute sessions that test what the screen actually shows.
@@ -96,7 +97,8 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
        -> cross-check: POS, CHROM and green each find their own peak; if no
           second method agrees (within 5 BPM) the estimate is not trusted
        -> tracker: acquiring / locked / holding / lost -> dashboard
-          (first estimate after 5 s, with a stricter bar for short windows)
+          (first estimate after 8 s of data; a new number is shown dimmed as
+          "settling" until it has lasted 6 s and passed a stricter check)
 ```
 
 ## Tech stack
@@ -202,6 +204,12 @@ intro.
 * scipy is not loaded in the browser. `vitals_dsp` falls back to
   `signal_lite.py`, numpy versions of the three scipy functions it uses.
 * On machines with software-only graphics, face tracking goes straight to CPU.
+* Two seconds after the camera starts, its auto exposure and white balance are
+  locked at their current values where the browser allows it (many webcams in
+  Chrome): every automatic adjustment changes the skin's colour far more than a
+  heartbeat does. Light mode unlocks, lets the camera adapt, and locks again.
+* Frames are timed by when the camera captured them, not when the page got
+  round to processing them.
 
 Not in the web version yet: the liveness check and recording.
 
@@ -230,11 +238,22 @@ python fetch_mcd_rppg.py --subjects 16 --seed 1 --out mcd_test
 python evaluate_video.py mcd_test --jobs 4
 ```
 
-**Held-out test set, what the app shows** (tracker on, number on screen vs the sensor, every second):
+**Held-out test set, what the app shows** (number on screen vs the sensor, every second):
 
-| Coverage (a number is shown) | MAE | RMSE | Pearson r | Within 5 BPM |
-| --- | --- | --- | --- | --- |
-| 47% | 7.1 BPM | 13.3 BPM | 0.60 | 67% |
+| What is on screen | Share of the time | MAE | RMSE | Pearson r | Within 5 BPM |
+| --- | --- | --- | --- | --- | --- |
+| steady number | 42% | 6.7 BPM | 13.0 BPM | 0.63 | 68% |
+| "settling" number (dimmed) | 18% | 12.8 BPM | | | 49% |
+| "--" | 39% | | | | |
+
+**How fast** (held-out test set, the first 75 s of each recording, timed from
+when the face is in view; page loading comes on top):
+
+| | Before | After |
+| --- | --- | --- |
+| median time to the first number | 15.2 s | **10.5 s** |
+| a number within 30 s | 72% | **88%** |
+| no number at all in 75 s | 12% | **6%** |
 
 **Every 15 s window, before and after the changes below** (no tracker, the
 usual way rPPG papers report):
@@ -294,8 +313,21 @@ it:
    never read). Restoring them lowered the display's error from 8.4 to
    7.1 BPM on the test set (6.6 on development) and raised its correlation
    with the sensor from 0.48 to 0.60. A regression test now covers it.
+6. **Faster first number, honestly labelled.** On real data the tracker's
+   signal-quality bar (SNR) barely predicted a correct reading, yet waiting
+   for it doubled the time to the first number; windows shorter than 8 s,
+   on the other hand, were clearly worse (~40% right vs ~60%). So the app now
+   waits for 8 s of data with a lower bar, and shows a new number dimmed as
+   "settling" until it has lasted 6 s and passed the old bar once. Settling
+   numbers are right only about half the time, which is what the label is
+   for; steady ones are as accurate as before (test set: 68% within 5 BPM vs
+   67%). The test set was used to choose this two-step design over a single
+   lower bar, which showed more numbers but more wrong ones.
 
-Things that did **not** help and were left out: a stricter tracker (it hid
+Things that did **not** help and were left out: per-window confidence
+checks (whether forehead and cheeks agree, whether the estimate is stable,
+how dominant the main peak is: none told right from wrong readings apart
+much better than chance), a stricter tracker (it hid
 more readings, but the share of wrong ones stayed the same), penalising
 frequencies seen on the background wall, and different patch weightings.
 

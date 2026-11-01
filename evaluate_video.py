@@ -169,7 +169,8 @@ WINDOW_METHODS = {          # name: analyze_heart_rate settings
 def evaluate_subject(feats, ref_fn):
     """
     ref_fn(t_end) -> reference BPM for the window ending at t_end, or None.
-    Returns {"windows": {method: [(t, est, ref)]}, "screen": [(t, shown or None, ref)]}.
+    Returns {"windows": {method: [(t, est, ref)]}, "screen": [(t, shown or None, ref)],
+             "steady": the same with "settling" numbers (see HeartRateTracker) as None}.
     """
     t = feats["t"]
     windows = {m: [] for m in WINDOW_METHODS}
@@ -186,10 +187,11 @@ def evaluate_subject(feats, ref_fn):
         end += STEP_SEC
 
     shown = simulate_display(t, feats["patches"], feats["background"], feats["face"], feats["moving"],
-                             HeartRateTracker(), pose=feats["pose"])
-    screen = [(now, b, ref_fn(now)) for now, b, _ in shown if now - t[0] >= 8.0]
-    screen = [s for s in screen if s[2] is not None]
-    return {"windows": windows, "screen": screen}
+                             HeartRateTracker(), pose=feats["pose"], with_settling=True)
+    shown = [(now, b, ref_fn(now), settling) for now, b, _, settling in shown if now - t[0] >= 8.0]
+    shown = [s for s in shown if s[2] is not None]
+    return {"windows": windows, "screen": [(now, b, ref) for now, b, ref, _ in shown],
+            "steady": [(now, None if settling else b, ref) for now, b, ref, settling in shown]}
 
 
 def score_video(job):
@@ -270,7 +272,7 @@ def main():
             print(f"skip {name}: no ground_truth.txt and no --ref-bpm")
     os.makedirs(args.out, exist_ok=True)
     all_windows = {m: [] for m in WINDOW_METHODS}
-    all_screen, rows, groups = [], [], {}
+    all_screen, all_steady, rows, groups = [], [], [], {}
     for name, res in score_all(jobs, args.jobs):
         m_all = metrics([(e, r) for _, e, r in res["windows"]["full pipeline (auto)"]])
         m_scr = metrics([(e, r) for _, e, r in res["screen"]])
@@ -281,8 +283,9 @@ def main():
         for m in WINDOW_METHODS:
             all_windows[m] += [(e, r) for _, e, r in res["windows"][m]]
         all_screen += [(e, r) for _, e, r in res["screen"]]
+        all_steady += [(e, r) for _, e, r in res["steady"]]
         if "_" in name:                             # e.g. 1020_before / 1020_after (MCD-rPPG)
-            groups.setdefault(name.rsplit("_", 1)[1], []).extend((e, r) for _, e, r in res["screen"])
+            groups.setdefault(name.rsplit("_", 1)[1], []).extend((e, r) for _, e, r in res["steady"])
 
     if not rows:
         return
@@ -298,8 +301,14 @@ def main():
     print(f"\n2) What the app would have shown: coverage {cov:.0%}, MAE {x['MAE']:.2f}, RMSE {x['RMSE']:.2f}, "
           f"r {x['r']:.2f}, within 5 BPM {x['<=5']:.0%}")
     md.append(f"| app display (tracker on) | coverage {cov:.0%} | {x['MAE']:.2f} | {x['RMSE']:.2f} | {x['r']:.2f} | {x['<=5']:.0%} |")
+    x = metrics(all_steady)
+    cov = np.mean([e is not None for e, _ in all_steady])
+    print(f"   steady numbers only (not 'settling'): coverage {cov:.0%}, MAE {x['MAE']:.2f}, RMSE {x['RMSE']:.2f}, "
+          f"r {x['r']:.2f}, within 5 BPM {x['<=5']:.0%}")
+    md.append(f"| app display, steady numbers only | coverage {cov:.0%} | {x['MAE']:.2f} | {x['RMSE']:.2f} | {x['r']:.2f} "
+              f"| {x['<=5']:.0%} |")
     if len(groups) > 1:                             # e.g. at rest vs after exercise
-        print("\n3) What the app showed, by group (folder name after the last _):")
+        print("\n3) Steady numbers, by group (folder name after the last _):")
         md += ["", "| Group | Coverage | Mean reference (BPM) | MAE (BPM) | RMSE (BPM) | Within 5 BPM |",
                "| --- | --- | --- | --- | --- | --- |"]
         for g, pairs in sorted(groups.items()):
@@ -315,9 +324,9 @@ def main():
         f.write("video,window_MAE,window_RMSE,screen_coverage,screen_MAE\n")
         for name, a, s, c in rows:
             f.write(f"{name},{a['MAE']:.3f},{a['RMSE']:.3f},{c:.3f},{s['MAE']:.3f}\n")
-    if len([e for e, _ in all_screen if e is not None]) >= 2:
-        bland_altman(all_screen, os.path.join(args.out, "bland_altman.png"),
-                     "Camera vs reference heart rate (what the app shows)")
+    if len([e for e, _ in all_steady if e is not None]) >= 2:
+        bland_altman(all_steady, os.path.join(args.out, "bland_altman.png"),
+                     "Camera vs reference heart rate (steady numbers on screen)")
     print(f"\nSaved {args.out}/summary.md, per_video.csv, bland_altman.png")
 
 

@@ -24,6 +24,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 28s-11-7-11-15a6 6 0 0 1 11-3 6 6 0 0 1 11 3c0 8-11 15-11 15z' fill='%23e5484d'/></svg>">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preconnect" href="https://storage.googleapis.com" crossorigin>
+  <link rel="preload" as="fetch" crossorigin href="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task">
   <link rel="stylesheet" href="style.css">
   <script type="module" src="app.js"></script>
 </head>
@@ -80,11 +81,11 @@
       <h2>For the best reading</h2>
       <ol>
         <li>Sit still and face the camera, in good, even light (a window or lamp in front of you).</li>
-        <li>The first number usually appears within 10-20 seconds and describes roughly the last 15.</li>
+        <li>A first number appears after about 10-15 seconds, dimmed while it settles, and describes roughly the last 15.</li>
         <li>Try <strong>Light mode</strong> in a dim room: the screen turns white and lights your face.</li>
       </ol>
       <p class="muted small">Not a medical device. Not for health, stress or diagnostic use.
-         Tested against a finger pulse sensor on 16 people it was never tuned on: 67% of readings within 5 BPM,
+         Tested against a finger pulse sensor on 16 people it was never tuned on: 68% of steady readings within 5 BPM,
          best in bright, even light (<a href="https://github.com/aboodgitawaida/Vitals#validation">full results</a>).</p>
     </section>
 

@@ -173,11 +173,11 @@ class HeartRateTracker:
 
     5. Confirm the first reading.
        From acquiring/lost, a strong reading must repeat for ACQUIRE_SEC before
-       a number appears. Why 1.5 s and not "two windows in a row"? Windows
-       0.5 s apart share 14.5 of their 15 seconds of data, so two in a row are
-       nearly the same measurement and agree even when it is noise. 1.5 s adds
-       a little genuinely new data; session_benchmark.py showed the 0.5 s
-       version letting a noise peak through on dim, darker-skin sessions.
+       a number appears. Why 1 s and not "two windows in a row"? Windows
+       0.5 s apart share most of their data, so two in a row are nearly the
+       same measurement and agree even when it is noise. In session_benchmark
+       --vanish, 0.5 s showed a number 0.9% of the time after the pulse was
+       gone, 1 s 0.4%, at a cost of half a second.
 
     6. Methods must agree.
        analyze_heart_rate also finds the peak with POS, CHROM and green
@@ -195,25 +195,40 @@ class HeartRateTracker:
 
     The displayed value is the median of the last few accepted estimates.
 
-    Settings were chosen with session_benchmark.py (coverage, "confidently
-    wrong" time, and how fast the number disappears when the pulse does) on
-    SIMULATED data. They get re-checked on real recordings in Phase 4.
+    8. Show it early, say it is settling.
+       A new number is marked "settling" (the dashboard dims it) until it has
+       been on screen for SETTLE_SEC AND at least one window since it appeared
+       reached SNR_CONFIRM. The low entry bar gives a number quickly; the
+       stricter bar decides when it is shown as steady.
+
+    Calibrated on REAL recordings (MCD-rPPG development set, see README):
+    there, a higher SNR barely predicted a correct reading (windows passing
+    0 dB were right 60% of the time, those passing 3 dB no more often), while
+    waiting for it doubled the time to the first number. So the entry bar is
+    low (-1 dB), a first reading needs 1 s of agreement, and the app waits for
+    8 s of data instead (live_session.MIN_SEC): shorter windows were right
+    only ~40% of the time, 8 s and longer ~60%. Median time to the first
+    number: 16 s -> 10.5 s, with the same accuracy over the first minute.
+    session_benchmark.py still measures the simulated cases (pure noise,
+    vanishing pulse).
     """
 
-    SNR_ENTER = 0.0      # dB, start showing a number
-    SNR_KEEP = -1.5      # dB, keep showing it if the peak agrees with the track
+    SNR_ENTER = -1.0     # dB, start showing a number
+    SNR_KEEP = -2.5      # dB, keep showing it if the peak agrees with the track
     GATE_BPM = 10.0      # "agrees with the track" = within this many BPM
     CONFIRM_BPM = 5.0    # two estimates "agree" if within this
     CONFIRM_SEC = 2.0    # a jump must persist this long to be believed
-    ACQUIRE_SEC = 1.5    # a first reading must persist this long before it is shown
+    ACQUIRE_SEC = 1.0    # a first reading must persist this long before it is shown
     REFRESH_SEC = 4.0    # a weak window only counts if a strong one was seen this recently
     HOLD_SEC = 3.0       # show a held value at most this long
     PRIOR_SEC = 10.0     # keep favouring the old track this long after the last accept
     SMOOTH_N = 5         # median of this many accepted estimates
     MIN_AGREEMENT = 2             # of 3 methods (POS, CHROM, green) must agree on the peak
-    SHORT_WINDOW_EXTRA_DB = 1.0   # extra SNR needed for the shortest (5 s) windows
+    SHORT_WINDOW_EXTRA_DB = 0.0   # extra SNR needed for the shortest (5 s) windows (off: see above)
     SHORT_WINDOW_SEC = 5.0        # window length that gets the full extra
     FULL_BAR_SEC = 8.0            # from this window length on, no extra
+    SETTLE_SEC = 6.0              # a new reading is "settling" for at least this long...
+    SNR_CONFIRM = 0.0             # ...and until a window reaches this SNR (dB)
 
     def __init__(self, **overrides):
         for k, v in overrides.items():
@@ -229,12 +244,17 @@ class HeartRateTracker:
         self.history = deque(maxlen=self.SMOOTH_N)
         self.candidate = None        # (first seen, last seen, [estimates]) of an unconfirmed value
         self.last_snr = None
+        self.track_started = None    # when the current number first appeared
+        self.confirmed = False       # a window reached SNR_CONFIRM since then
 
     def _start_track(self, now, estimates):
         """Begin a new track, seeded with the agreeing estimates that confirmed it."""
         self.history.clear()
         self.history.extend(estimates)
         self.track = float(np.median(self.history))
+        if self.last_accept is None or now - self.last_accept > self.HOLD_SEC:
+            self.track_started = now             # a new number appears (not a jump within a shown track)
+            self.confirmed = False
         self.last_accept = self.last_strong = now
         self.candidate = None
 
@@ -280,6 +300,8 @@ class HeartRateTracker:
         has_track = self.track is not None and now - self.last_accept <= self.HOLD_SEC
         if bpm is not None and snr_db is not None and usable:
             snr_db = snr_db - self.extra_db(window_sec)   # short window: same rules, higher bar
+            if has_track and snr_db >= self.SNR_CONFIRM and abs(bpm - self.track) <= self.GATE_BPM:
+                self.confirmed = True
             if has_track:
                 near = abs(bpm - self.track) <= self.GATE_BPM
                 strong = snr_db >= self.SNR_ENTER
@@ -300,6 +322,12 @@ class HeartRateTracker:
                     self._start_track(now, self.candidate[2])
 
         return self.reading(now)
+
+    def settling(self, now):
+        """True while the shown number is new (rule 8)."""
+        if self.track is None or self.track_started is None or now - self.last_accept > self.HOLD_SEC:
+            return False
+        return now - self.track_started < self.SETTLE_SEC or not self.confirmed
 
     def prior(self, now=None):
         if self.track is None or self.last_accept is None:
@@ -350,8 +378,8 @@ class LegacyDisplay:
 # --------------------------------------------------------------------------
 
 def simulate_display(times, patches, background, face, moving, display, max_gap_sec=1.0,
-                     drop_motion=True, window_sec=15.0, min_sec=5.0, update_every=0.5,
-                     motion_hold=1.5, method="auto", pose=None):
+                     drop_motion=True, window_sec=15.0, min_sec=8.0, update_every=0.5,
+                     motion_hold=1.5, method="auto", pose=None, with_settling=False):
     """
     Replays per-frame data in the same order as vitals_app.py and returns
     [(time, bpm shown or None, state), ...] once per update.
@@ -361,6 +389,7 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
       face:   (N,) bool, False = FaceMesh found no face in that frame
       moving: (N,) bool, True = fast head motion in that frame
       pose:   (N, K) head pose per frame (POSE_FIELDS), or None (no motion correction)
+      with_settling: add a 4th item, True while the shown number is still "settling"
     """
     names = list(patches)
     buf = SampleBuffer(names, window_sec, max_gap_sec)
@@ -391,5 +420,9 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
                                      usable=now - last_motion >= motion_hold, window_sec=buf.span(),
                                      agreement=r and r.get("agreement"))
         prior = reading.prior_bpm
-        out.append((float(now), reading.bpm, reading.state))
+        item = (float(now), reading.bpm, reading.state)
+        if with_settling:
+            settling = getattr(display, "settling", None)
+            item += (bool(reading.bpm is not None and settling and settling(now)),)
+        out.append(item)
     return out

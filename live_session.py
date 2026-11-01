@@ -22,7 +22,8 @@ from vitals_stream import HeartRateTracker, SampleBuffer
 
 # ---------------- Settings you can tune (shared with vitals_app.py) ----------------
 WINDOW_SEC = 15          # seconds of history per estimate (15 s -> ~4 BPM frequency resolution)
-MIN_SEC = 5              # first estimate after 5 s (the tracker asks more of short windows)
+MIN_SEC = 8              # first estimate after 8 s: on real recordings shorter windows were right
+                         # only ~40% of the time (see HeartRateTracker). Keep in sync with simulate_display.
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
 FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
@@ -153,6 +154,8 @@ class LiveSession:
             self.status = "Weak signal - holding last reading"
         elif self.reading.bpm is None:
             self.status = self.lighting[1] if self.lighting[0] != "good" else "Weak signal - keep still"
+        elif self.tracker.settling(now):
+            self.status = "Settling - keep still for a steadier number"
         else:
             self.status = ""
         return ran
@@ -176,6 +179,7 @@ class LiveSession:
         out = {
             "bpm": _num(r.bpm), "state": r.state, "level": self.level(), "status": self.status,
             "lighting": list(self.lighting), "method": self.method,
+            "settling": bool(r.bpm is not None and self.tracker.settling(self.last_update)),
             "use_background": self.use_background, "use_motion": self.use_motion,
             "collected_sec": float(self.buffer.span()), "min_sec": MIN_SEC,
             "trend": [[float(t), _num(b)] for t, b in self.trend],

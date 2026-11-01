@@ -121,6 +121,10 @@ button:disabled { opacity: 0.6; cursor: default; }
 .unit { font-size: 20px; }
 .level { display: flex; align-items: center; gap: 8px; color: var(--lvl, var(--none)); font-weight: 600; font-size: 13px; margin: 6px 0 4px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--lvl, var(--none)); }
+.hr.settling .value { opacity: 0.55; }
+.hr.settling .dot { animation: pulse-dot 1s ease-in-out infinite; }
+@keyframes pulse-dot { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .hr.settling .dot { animation: none; } }
 .hr[data-level="good"] { --lvl: var(--good); }
 .hr[data-level="fair"] { --lvl: var(--fair); }
 .hr[data-level="none"] { --lvl: var(--none); }
