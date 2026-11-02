@@ -7,6 +7,7 @@
 // load (the network's weights), with a manifest the worker reads. Nothing is
 // compiled: the .py files are served as they are.
 
+import { execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,4 +38,8 @@ const files = localModules("live_session");
 const data = ["vitals_net_weights.npz"].filter((f) => existsSync(join(root, f)));
 for (const f of [...files, ...data]) cpSync(join(root, f), join(out, "py", f));
 writeFileSync(join(out, "py", "manifest.json"), JSON.stringify({ modules: files, data }));
+// Which code a saved session ran (replay_session.py reports it).
+let commit = process.env.VERCEL_GIT_COMMIT_SHA || null;
+if (!commit) { try { commit = execSync("git rev-parse HEAD", { cwd: root }).toString().trim(); } catch {} }
+writeFileSync(join(out, "version.json"), JSON.stringify({ commit, built: new Date().toISOString() }));
 console.log(`dist/ ready (python: ${files.join(", ")}; data: ${data.join(", ") || "none"})`);

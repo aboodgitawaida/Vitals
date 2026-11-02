@@ -16,7 +16,7 @@ from collections import deque
 
 import numpy as np
 
-from face_layout import REGIONS, TRACES, assess_lighting, patch_region
+from face_layout import REGIONS, TRACES, assess_framing, assess_lighting, patch_region
 from vitals_dsp import GREEN_MARGIN_DB, HR_HIGH, HR_LOW, analyze_heart_rate, use_net
 from vitals_stream import HeartRateTracker, SampleBuffer
 
@@ -33,6 +33,7 @@ TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than th
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
 METHODS = ["auto", "classic", "pos", "green"]   # auto: the trained network when shipped (vitals_dsp)
 TREND_SEC = 60           # length of the trend chart
+FRAMING_FRAMES = 15      # framing advice must hold over most of the last ~0.5 s (face_layout.assess_framing)
 
 
 def start_sec(method):
@@ -70,14 +71,18 @@ class LiveSession:
         self.trend = deque()                     # (time, bpm or None) for the trend chart
         self.talking_level = deque(maxlen=30)    # mouth opening over the last ~1 s
         self.lighting = ("none", "Light: waiting for face")
+        self.framing = deque(maxlen=FRAMING_FRAMES)   # framing message (or None) per recent frame
         self.last_motion = self.last_small_motion = -99.0
         self.status = ""
+        self.resets = deque(maxlen=20)           # (time, why): every start-over, for diagnostics
         self.reset()
 
     # ---------------- controls ----------------
 
-    def reset(self):
+    def reset(self, now=None, why="requested"):
         """Start over (long face loss, light mode switched: old samples no longer match)."""
+        if now is not None:
+            self.resets.append((float(now), why))
         self.buffer.reset()
         self.tracker.reset()
         self.analysis = None
@@ -107,12 +112,17 @@ class LiveSession:
         ran = False
         if not face:
             # Brief loss (blink, hand passing): keep the data and ride it out.
+            last_seen = self.buffer.last_face_time
             if self.buffer.add_missing(now):
                 self.status = "Face lost - hold still"
                 self.reading = self.tracker.reading(now)
             else:
-                self.reset()
+                if last_seen is not None:
+                    self.reset(now, f"face lost for {now - last_seen:.1f} s")
+                else:
+                    self.reset()
                 self.status = "No face detected"
+            self.framing.clear()
             return ran
 
         if fast_motion:
@@ -121,6 +131,7 @@ class LiveSession:
             self.last_small_motion = now
         if pose is not None:
             self.talking_level.append(pose[4])
+        self.framing.append(assess_framing((stats or {}).get("framing")))
         # Fast-motion frames are stored as gaps (filled by interpolation), so a
         # head turn doesn't poison the next 15 s of windows.
         if fast_motion:
@@ -153,7 +164,10 @@ class LiveSession:
         while self.trend and now - self.trend[0][0] > TREND_SEC:
             self.trend.popleft()
 
-        if have < need:
+        framing = self.framing_problem()
+        if framing:
+            self.status = framing                # the cause comes first: no point saying "hold still"
+        elif have < need:
             self.status = f"Hold still... collecting {have:.0f}/{need} s"
         elif moving:
             self.status = "Movement detected - hold still"
@@ -170,6 +184,16 @@ class LiveSession:
         return ran
 
     # ---------------- what to show ----------------
+
+    def framing_problem(self):
+        """The framing message if most recent frames had it (so it doesn't flicker), else None."""
+        if len(self.framing) < self.framing.maxlen // 2:
+            return None
+        msgs = [m for m in self.framing if m]
+        if not msgs:
+            return None
+        top = max(set(msgs), key=msgs.count)
+        return top if msgs.count(top) > 0.6 * len(self.framing) else None
 
     def level(self):
         """Colour of the reading: good / fair / none."""
@@ -193,6 +217,8 @@ class LiveSession:
             "settling": bool(r.bpm is not None and self.tracker.settling(self.last_update)),
             "use_background": self.use_background, "use_motion": self.use_motion,
             "collected_sec": float(self.buffer.span()), "min_sec": start_sec(self.method),
+            "framing": self.framing_problem(),
+            "last_reset": list(self.resets[-1]) if self.resets else None,
             "trend": [[float(t), _num(b)] for t, b in self.trend],
             "regions": {k: [_num(s), float(w)] for k, (s, w) in region_summary(a).items()},
             "snr_db": None, "method_used": None, "agreement": None, "peak_bpm": None,
