@@ -441,7 +441,8 @@ function renderDashboard(info) {
   document.querySelector(".hr").classList.toggle("settling", Boolean(info.settling));
   $("level-text").textContent = info.state === "holding" ? "HOLDING (weak signal)"
     : info.settling ? "SETTLING" : LEVEL_TEXT[info.level];
-  const snr = info.snr_db === null ? "SNR --" : `SNR ${info.snr_db >= 0 ? "+" : ""}${info.snr_db.toFixed(1)} dB`;
+  const snr = info.confidence !== null && info.confidence !== undefined ? `${Math.round(info.confidence * 100)}% sure`
+    : info.snr_db === null ? "SNR --" : `SNR ${info.snr_db >= 0 ? "+" : ""}${info.snr_db.toFixed(1)} dB`;
   const used = (info.method_used || (info.method === "auto" ? "pos" : info.method)).toUpperCase();
   let method = info.method === "auto" ? `AUTO>${used}` : info.method.toUpperCase();
   if (info.agreement !== null) method += ` · ${info.agreement}/3 agree`;
@@ -505,6 +506,9 @@ function placeholder(ctx, w, h, text) {
 
 function drawSpectrum(info) {
   // Power at each frequency in the heart-rate band. The tallest bump is the heart rate.
+  // With the network: its probability for each heart rate instead (the same picture, learned).
+  if (info.posterior) return drawPosterior(info);
+  $("spectrum-label").textContent = "PULSE SPECTRUM";
   const { ctx, w, h } = setupCanvas($("spectrum"));
   const top = 4, bottom = h - 16, x = (bpm) => ((bpm - HR_LOW_BPM) / (HR_HIGH_BPM - HR_LOW_BPM)) * w;
   ctx.strokeStyle = cssVar("--grid");
@@ -532,6 +536,34 @@ function drawSpectrum(info) {
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x(info.peak_bpm), top); ctx.lineTo(x(info.peak_bpm), bottom); ctx.stroke();
     ctx.fillText(`peak ${Math.round(info.peak_bpm)}`, Math.min(x(info.peak_bpm) + 5, w - 60), top + 10);
+  }
+}
+
+function drawPosterior(info) {
+  $("spectrum-label").textContent = "HEART-RATE PROBABILITY (NETWORK)";
+  const { ctx, w, h } = setupCanvas($("spectrum"));
+  const lo = 40, hi = 180, top = 4, bottom = h - 16, x = (bpm) => ((bpm - lo) / (hi - lo)) * w;
+  ctx.strokeStyle = cssVar("--grid");
+  ctx.fillStyle = cssVar("--muted");
+  for (const bpm of [60, 90, 120, 150, 180]) {
+    ctx.beginPath(); ctx.moveTo(x(bpm), top); ctx.lineTo(x(bpm), bottom); ctx.stroke();
+    ctx.fillText(bpm, x(bpm) - 8, h - 3);
+  }
+  const p = info.posterior, max = Math.max(...p, 1e-9);
+  ctx.beginPath();
+  ctx.moveTo(x(lo), bottom);
+  p.forEach((v, i) => ctx.lineTo(x(lo + i), bottom - (v / max) * (bottom - top)));
+  ctx.lineTo(x(hi), bottom);
+  ctx.closePath();
+  ctx.fillStyle = cssVar("--wave");
+  ctx.globalAlpha = 0.25; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.strokeStyle = cssVar("--wave"); ctx.lineWidth = 2; ctx.stroke();
+  if (info.peak_bpm !== null) {
+    const color = cssVar(`--${info.level}`);
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x(info.peak_bpm), top); ctx.lineTo(x(info.peak_bpm), bottom); ctx.stroke();
+    const label = `${Math.round(info.peak_bpm)} BPM · ${Math.round((info.confidence || 0) * 100)}% sure`;
+    ctx.fillText(label, Math.min(x(info.peak_bpm) + 5, w - 110), top + 10);
   }
 }
 
@@ -626,7 +658,7 @@ $("map-toggle").addEventListener("click", () => setMap(!state.showMap));
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && state.light) setLight(false, false); });
 document.addEventListener("keydown", (e) => {
   if (!state.running || e.metaKey || e.ctrlKey || e.altKey) return;
-  const methods = ["auto", "pos", "green"];
+  const methods = ["auto", "classic", "pos", "green"];
   if (e.key === "m") setMethod(methods[(methods.indexOf(state.method) + 1) % methods.length]);
   else if (e.key === "b") setBackground(!state.background);
   else if (e.key === "l") setLight(!state.light);

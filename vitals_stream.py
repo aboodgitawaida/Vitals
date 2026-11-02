@@ -227,6 +227,10 @@ class HeartRateTracker:
     SHORT_WINDOW_EXTRA_DB = 0.0   # extra SNR needed for the shortest (5 s) windows (off: see above)
     SHORT_WINDOW_SEC = 5.0        # window length that gets the full extra
     FULL_BAR_SEC = 8.0            # from this window length on, no extra
+    CONF_ENTER = 0.4              # with the network: its confidence replaces SNR (tune_tracker.py, validation)
+    CONF_KEEP = 0.3
+    CONF_CONFIRM = 0.8
+    NET_AGREEMENT = False         # also require 2 of 3 hand-made methods to agree with the network?
     SETTLE_SEC = 6.0              # a new reading is "settling" for at least this long...
     SNR_CONFIRM = 0.0             # ...and until a window reaches this SNR (dB)
 
@@ -287,32 +291,40 @@ class HeartRateTracker:
         frac = np.clip((self.FULL_BAR_SEC - window_sec) / span, 0.0, 1.0)
         return float(self.SHORT_WINDOW_EXTRA_DB * frac)
 
-    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None, agreement=None):
+    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None, agreement=None,
+               confidence=None):
         """
         One new window. bpm/snr_db from analyze_heart_rate (None if no face
         data); usable=False when the head moved (estimate not trusted);
         window_sec = how many seconds of data the estimate used;
-        agreement = how many of the 3 methods agree with bpm (None = unknown).
+        agreement = how many of the 3 methods agree with bpm (None = unknown);
+        confidence = the network's own P(within 5 BPM) (vitals_net), or None.
+        With a confidence, it replaces SNR in every rule (CONF_* thresholds),
+        and method agreement is used only if NET_AGREEMENT is on.
         """
         self.last_snr = snr_db
-        if agreement is not None and agreement < self.MIN_AGREEMENT:
+        if agreement is not None and agreement < self.MIN_AGREEMENT and (confidence is None or self.NET_AGREEMENT):
             usable = False                      # one method alone: not trusted
         has_track = self.track is not None and now - self.last_accept <= self.HOLD_SEC
-        if bpm is not None and snr_db is not None and usable:
-            snr_db = snr_db - self.extra_db(window_sec)   # short window: same rules, higher bar
-            if has_track and snr_db >= self.SNR_CONFIRM and abs(bpm - self.track) <= self.GATE_BPM:
+        if confidence is not None:
+            quality, enter, keep, confirm = confidence, self.CONF_ENTER, self.CONF_KEEP, self.CONF_CONFIRM
+        else:
+            quality = None if snr_db is None else snr_db - self.extra_db(window_sec)   # short window: higher bar
+            enter, keep, confirm = self.SNR_ENTER, self.SNR_KEEP, self.SNR_CONFIRM
+        if bpm is not None and quality is not None and usable:
+            if has_track and quality >= confirm and abs(bpm - self.track) <= self.GATE_BPM:
                 self.confirmed = True
             if has_track:
                 near = abs(bpm - self.track) <= self.GATE_BPM
-                strong = snr_db >= self.SNR_ENTER
+                strong = quality >= enter
                 refreshed = now - self.last_strong <= self.REFRESH_SEC
-                if near and (strong or (snr_db >= self.SNR_KEEP and refreshed)):
+                if near and (strong or (quality >= keep and refreshed)):
                     self._accept(now, bpm, strong)
-                elif not near and snr_db >= self.SNR_ENTER:
+                elif not near and quality >= enter:
                     # Possible real change: believe it only if it persists.
                     if self._consider_candidate(now, bpm, self.CONFIRM_SEC):
                         self._start_track(now, self.candidate[2])
-            elif snr_db >= self.SNR_ENTER:
+            elif quality >= enter:
                 # No current track: a strong reading must persist ACQUIRE_SEC.
                 # (No shortcut for "same value as before the gap": the peak
                 # picker is already biased toward the old value, so agreeing
@@ -364,7 +376,7 @@ class LegacyDisplay:
         self.history.clear()
         self.bpm = None
 
-    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None, agreement=None):
+    def update(self, now, bpm=None, snr_db=None, usable=True, window_sec=None, agreement=None, confidence=None):
         if bpm is None or snr_db is None or not usable or snr_db < self.snr_min_db:
             self.reset()
             return Reading(None, "lost", snr_db, None)
@@ -418,7 +430,7 @@ def simulate_display(times, patches, background, face, moving, display, max_gap_
                                    prev_bpm=prior, patch_map=False, pose=buf.pose_array())
             reading = display.update(now, r and r["bpm"], r and r["snr_db"],
                                      usable=now - last_motion >= motion_hold, window_sec=buf.span(),
-                                     agreement=r and r.get("agreement"))
+                                     agreement=r and r.get("agreement"), confidence=r and r.get("confidence"))
         prior = reading.prior_bpm
         item = (float(now), reading.bpm, reading.state)
         if with_settling:

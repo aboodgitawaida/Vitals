@@ -17,20 +17,27 @@ from collections import deque
 import numpy as np
 
 from face_layout import REGIONS, TRACES, assess_lighting, patch_region
-from vitals_dsp import GREEN_MARGIN_DB, HR_HIGH, HR_LOW, analyze_heart_rate
+from vitals_dsp import GREEN_MARGIN_DB, HR_HIGH, HR_LOW, analyze_heart_rate, use_net
 from vitals_stream import HeartRateTracker, SampleBuffer
 
 # ---------------- Settings you can tune (shared with vitals_app.py) ----------------
 WINDOW_SEC = 15          # seconds of history per estimate (15 s -> ~4 BPM frequency resolution)
 MIN_SEC = 8              # first estimate after 8 s: on real recordings shorter windows were right
                          # only ~40% of the time (see HeartRateTracker). Keep in sync with simulate_display.
+NET_MIN_SEC = 6          # with the trained network: its shortest training window; chosen on validation
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
+CONF_GOOD = 0.8          # network confidence at or above: "good signal"
 FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
 TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than this over 1 s = talking
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
-METHODS = ["auto", "pos", "green"]
+METHODS = ["auto", "classic", "pos", "green"]   # auto: the trained network when shipped (vitals_dsp)
 TREND_SEC = 60           # length of the trend chart
+
+
+def start_sec(method):
+    """Seconds of data before the first estimate, for this method."""
+    return NET_MIN_SEC if method == "net" or (method == "auto" and use_net()) else MIN_SEC
 
 
 def region_summary(analysis):
@@ -123,7 +130,8 @@ class LiveSession:
 
         have = self.buffer.span()
         moving = now - self.last_motion < MOTION_HOLD
-        if have < MIN_SEC:
+        need = start_sec(self.method)
+        if have < need:
             self.lighting = assess_lighting(stats, fps)
             self.reading = self.tracker.update(now)
         elif analyze and now - self.last_update >= UPDATE_EVERY:
@@ -137,15 +145,16 @@ class LiveSession:
                 pose=self.buffer.pose_array(), use_motion=self.use_motion)
             self.analysis = a
             self.reading = self.tracker.update(now, a and a["bpm"], a and a["snr_db"], usable=not moving,
-                                               window_sec=have, agreement=a and a["agreement"])
+                                               window_sec=have, agreement=a and a["agreement"],
+                                               confidence=a and a.get("confidence"))
             self.trend.append((now, self.reading.bpm))
             self.last_update = now
             ran = True
         while self.trend and now - self.trend[0][0] > TREND_SEC:
             self.trend.popleft()
 
-        if have < MIN_SEC:
-            self.status = f"Hold still... collecting {have:.0f}/{MIN_SEC} s"
+        if have < need:
+            self.status = f"Hold still... collecting {have:.0f}/{need} s"
         elif moving:
             self.status = "Movement detected - hold still"
         elif len(self.talking_level) > 10 and np.std(self.talking_level) > TALKING_STD:
@@ -169,7 +178,9 @@ class LiveSession:
             return "none"
         if r.state == "holding":
             return "fair"
-        # "Good" needs a clean spectrum AND all three methods agreeing.
+        # Network: "good" when it is confident. Otherwise a clean spectrum AND all three methods agreeing.
+        if a is not None and a.get("confidence") is not None:
+            return "good" if a["confidence"] >= CONF_GOOD else "fair"
         good = a is not None and a["snr_db"] >= SNR_GOOD_DB and a["agreement"] == 3
         return "good" if good else "fair"
 
@@ -181,11 +192,12 @@ class LiveSession:
             "lighting": list(self.lighting), "method": self.method,
             "settling": bool(r.bpm is not None and self.tracker.settling(self.last_update)),
             "use_background": self.use_background, "use_motion": self.use_motion,
-            "collected_sec": float(self.buffer.span()), "min_sec": MIN_SEC,
+            "collected_sec": float(self.buffer.span()), "min_sec": start_sec(self.method),
             "trend": [[float(t), _num(b)] for t, b in self.trend],
             "regions": {k: [_num(s), float(w)] for k, (s, w) in region_summary(a).items()},
             "snr_db": None, "method_used": None, "agreement": None, "peak_bpm": None,
             "motion_patches": None, "patch_snr": {}, "spectrum": None, "pulse": None, "source": None,
+            "confidence": None, "posterior": None,
         }
         if a is not None:
             band = (a["freqs"] >= HR_LOW - 0.2) & (a["freqs"] <= HR_HIGH + 0.2)
@@ -193,6 +205,9 @@ class LiveSession:
                 "snr_db": _num(a["snr_db"]), "method_used": a["method_used"],
                 "agreement": int(a["agreement"]), "peak_bpm": _num(a["bpm"]),
                 "motion_patches": int(a["motion_patches"]), "source": a["source"],
+                "confidence": _num(a.get("confidence")),
+                # Network only: probability per BPM from 40 to 180 (vitals_net.BPM_BINS).
+                "posterior": None if a.get("posterior") is None else [round(float(p), 5) for p in a["posterior"]],
                 "patch_snr": {k: _num(v) for k, v in a["patch_snr"].items()},
                 # Every 4th bin is plenty for a chart and keeps the message small.
                 "spectrum": [(a["freqs"][band][::4] * 60).tolist(), a["power"][band][::4].tolist()],

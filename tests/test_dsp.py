@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+import vitals_dsp
 from synthetic_benchmark import make_trial
 from vitals_dsp import (FS, HR_HIGH, HR_LOW, _fill_missing, analyze_heart_rate, bandpass,
                         pick_peak, pos_pulse, power_spectrum, remove_background, resample_uniform,
@@ -149,3 +150,36 @@ def test_agreement_reported_and_high_on_clean_data():
     r = analyze_heart_rate(t, patches, bg, patch_map=False)
     assert set(r["method_bpm"]) == {"pos", "chrom", "green"}
     assert r["agreement"] == 3
+
+
+def _flicker_scene(drop_every=None, seconds=15.0, bpm=87.0, fps=29.92):
+    """Face colour with a weak pulse and a strong 10 Hz light flicker (as 50 Hz mains looks to a 30 fps camera)."""
+    rng = np.random.default_rng(3)
+    t = np.arange(int(seconds * fps)) / fps
+    if drop_every:
+        t = t[np.arange(len(t)) % drop_every != drop_every - 1]
+    pulse = 0.003 * np.sin(2 * np.pi * bpm / 60 * t)
+    flicker = 0.15 * np.sin(2 * np.pi * 10.1 * t)
+    skin = np.array([170.0, 120.0, 95.0])
+    tint = np.array([1.0, 0.6, 0.3])                          # light flicker changes colour, not only brightness
+    face = skin * (1 + pulse[:, None] * np.array([0.33, 0.77, 0.53]) + flicker[:, None] * tint) + rng.normal(0, 0.05, (len(t), 3))
+    wall = np.array([180.0, 180.0, 180.0]) * (1 + flicker[:, None] * tint) + rng.normal(0, 0.05, (len(t), 3))
+    return t, {"face": face}, wall
+
+
+def test_deflicker_leaves_even_frames_alone():
+    t, traces, wall = _flicker_scene()
+    out, bg = vitals_dsp.deflicker(t, traces, wall)
+    assert out is traces and bg is wall
+
+
+def test_deflicker_stops_flicker_aliasing_into_heart_rate_band(monkeypatch):
+    t, traces, wall = _flicker_scene(drop_every=5)           # 30 -> 24 fps: every 5th frame missing
+    assert abs(vitals_dsp.flicker_hz(t, traces["face"].mean(axis=1)) - 10.1) < 0.05
+
+    def bpm():
+        return analyze_heart_rate(t, traces, None, method="green", patch_map=False, use_background=False)["bpm"]
+    monkeypatch.setattr(vitals_dsp, "DEFLICKER", False)
+    assert abs(bpm() - 87.0) > 10                             # the flicker wins without the fix
+    monkeypatch.setattr(vitals_dsp, "DEFLICKER", True)
+    assert abs(bpm() - 87.0) < 3
