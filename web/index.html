@@ -145,7 +145,12 @@
       <button id="light-toggle" aria-pressed="false" title="White full screen, so your screen lights your face (L)">Light mode</button>
       <button id="map-toggle" aria-pressed="true" title="Show/hide the patch SNR map (R)">SNR map</button>
       <button id="stop">Stop</button>
-      <span class="muted small keys">Keys: M method · B background · L light · R map · P performance</span>
+      <span class="save">
+        <input id="ref-bpm" type="number" min="30" max="220" inputmode="numeric" placeholder="Your real BPM"
+               aria-label="Your real heart rate from a watch (optional, saved with the session data)">
+        <button id="save" title="Download this session's per-frame skin colours (no images, nothing uploaded) to replay it for debugging (D)">Save session data</button>
+      </span>
+      <span class="muted small keys">Keys: M method · B background · L light · R map · P performance · D save</span>
     </nav>
   </main>
 

@@ -51,6 +51,11 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--muted); }
+.save { display: inline-flex; gap: 6px; align-items: center; }
+#ref-bpm {
+  font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--grid); border-radius: 8px; padding: 8px 10px; width: 9.5em;
+}
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; padding: 10px 20px; }

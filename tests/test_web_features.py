@@ -98,6 +98,8 @@ def test_js_features_match_python():
         for region, lum in p.overlay["stats"]["luminance"].items():
             assert j["stats"]["luminance"][region] == pytest.approx(lum, abs=0.3)
         assert j["stats"]["clipped_fraction"] == pytest.approx(p.overlay["stats"]["clipped_fraction"], abs=0.01)
+        for k, v in p.overlay["stats"]["framing"].items():                 # framing coach inputs
+            assert j["stats"]["framing"][k] == pytest.approx(v, abs=1e-6), k
     assert compared > 50
 
 
