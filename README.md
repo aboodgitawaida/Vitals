@@ -11,33 +11,52 @@
 
 [**Try it live →**](https://vitals-track.vercel.app)
 
-<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard finding a heart rate of 69-75 BPM in a real recording, first dimmed as settling, then steady" width="820"></a>
+<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard reading 67-72 BPM from a held-out recording: no reading, then a dimmed settling number, then a steady one with the network's probability curve" width="820"></a>
 
-<sub>The web app reading a real recording from the MCD-rPPG dataset through a virtual camera:
-69-75 BPM; the finger pulse sensor read 73-77. A new number is dimmed ("settling") until it is steady.
+<sub>The web app reading a recording of a person the network never trained on (MCD-rPPG test split,
+typical accuracy for that split) through a virtual camera: 67-72 BPM; the finger pulse sensor read 70-74.
+A new number is dimmed ("settling") until it is steady; the chart is the network's probability for every heart rate.
 Dashed line: the skin it measures. Face blurred for privacy.</sub>
 
 </div>
 
 Each heartbeat pushes blood into the skin and changes its colour very slightly,
 far too little to see. Vitals tracks your face, measures that colour across
-the skin of the whole face, removes what room light explains, and recovers your
-pulse. This technique is called **remote photoplethysmography (rPPG)**.
+the skin of the whole face and in 16 patches, and a small neural network,
+trained on 400 people filmed alongside a finger pulse sensor, turns it into a
+heart rate and says how sure it is. This technique is called **remote
+photoplethysmography (rPPG)**.
 
 ## At a glance
 
 | | |
 | --- | --- |
 | **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
-| **How** | MediaPipe face tracking in JavaScript; the project's own Python signal processing runs unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
-| **Accuracy** | Tested against a finger pulse sensor on 32 held-out recordings of 16 people ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): 68% of the steady readings it shows are within 5 BPM (average error 6.7 BPM), and a first, provisional reading appears after a median of 10.5 s. Strongly depends on light: 30% of windows within 5 BPM in dim recordings, 72% in bright ones. [Details](#validation) |
-| **Engineering** | One codebase, two runtimes; a test that the JavaScript and Python measure exactly the same pixels; 82 tests and a linter in CI; a reproducible evaluation with separate development and test sets. |
-| **Honesty** | Shows "--" instead of guessing, publishes its failure cases, and explains what it deliberately does not measure. |
+| **How** | MediaPipe face tracking in JavaScript; a neural network ([`vitals_net.py`](vitals_net.py), 74k weights, trained in PyTorch, run in numpy) and the project's own Python signal processing run unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
+| **Accuracy** | Tested once against a finger pulse sensor on 200 recordings of 100 people the network never saw ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): **85% of the steady readings it shows are within 5 BPM** (average error 3.0 BPM), against 67% (6.6 BPM) for the hand-made pipeline it replaced. The first number appears after a median of **7 s** (was 10 s), within 15 s for 96% of recordings (was 66%). [Details](#validation) |
+| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 90 tests and a linter in CI. |
+| **Honesty** | The network's confidence is calibrated (when it says 90%+, it is right 95% of the time), so the app shows "--" instead of guessing; failure cases are published, and so is what it deliberately does not measure. |
 
 > Not a medical device. Not for health, stress or diagnostic use.
 
 ## Highlights
 
+* **A neural network that knows when it is right.** The hand-made pipeline's
+  errors were confident errors: no check on its own signal told right from
+  wrong. So a small network was trained on 400 people from MCD-rPPG to read
+  the same skin colours and output a probability for every heart rate.
+  On 100 held-out people it halves the error (15 s windows: 5.5 vs 10.3 BPM,
+  95% intervals not overlapping), and its confidence predicts correctness,
+  which lets the app show a number sooner and stay quiet when unsure. It
+  runs in the browser in numpy (280 KB of weights; a whole update, network
+  included, takes ~200 ms on a CPU-only machine, within the 500 ms interval).
+  See [The model](#the-model).
+* **A bug found by running it, measured and mostly fixed.** The browser check
+  on a held-out video read 87 BPM as ~110. Cause: room light on 50 Hz mains is
+  a 10 Hz tone ~2500x stronger than the pulse, and dropped frames mix it into
+  the heart-rate band. The fix (`vitals_dsp.deflicker`) brings the network
+  from 56% to 70% of windows within 5 BPM when 30% of frames are dropped
+  (75% with no drops), and changes nothing when no frames are dropped.
 * **One Python codebase, two runtimes.** The analysis (`live_session.py`,
   `vitals_dsp.py`, `vitals_stream.py`) runs natively on desktop and in a Web
   Worker in the browser. A build step finds every module it imports and ships
@@ -51,17 +70,18 @@ pulse. This technique is called **remote photoplethysmography (rPPG)**.
   development set, 20% on the held-out test set. See
   [What real data changed](#what-real-data-changed).
 * **Honest by design.** A tracker (acquiring / locked / holding / lost) shows
-  "--" instead of guessing when the signal is weak, and three rPPG methods
-  (POS, CHROM, green) must agree before a number is trusted. No brightness
-  cut-off is used even though dim recordings are less accurate, because face
-  brightness also depends on skin tone.
+  "--" instead of guessing when the network is unsure; its thresholds were
+  chosen on validation people only. No brightness cut-off is used even though
+  dim recordings are less accurate, because face brightness also depends on
+  skin tone.
 * **Fast first reading.** The camera and face tracking start before Python has
-  loaded, and measured frames are queued and analysed when it is ready. A
-  first number appears after a median of 10.5 s of face time (it was 15 s),
-  shown dimmed as "settling" until it has lasted 6 s and passed a stricter
-  check; steady numbers are as accurate as before.
-* **Tested.** 82 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
-  including JavaScript/Python parity of the colour measurement and simulated
+  loaded, and measured frames are queued and analysed when it is ready. The
+  network needs 6 s of data, so a first number appears after a median of 7 s
+  of face time (15 s two versions ago), shown dimmed as "settling" until it
+  has lasted 6 s and the network is 80% sure.
+* **Tested.** 90 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
+  including numpy-vs-PyTorch parity of the network on a committed fixture,
+  JavaScript/Python parity of the colour measurement, and simulated
   2-minute sessions that test what the screen actually shows.
   `tests/browser_check.mjs` runs the real web app in headless Chromium on a
   dataset video.
@@ -77,11 +97,12 @@ flowchart LR
         FL --> FX["features.js<br/>whole-face skin, 16 patches,<br/>wall, head pose, motion"]
     end
     subgraph Worker["Web Worker · Pyodide"]
-        LS["live_session.py"] --> DSP["vitals_dsp.py<br/>POS · CHROM · green<br/>cross-checked"]
-        DSP --> TR["vitals_stream.py<br/>tracker"]
+        LS["live_session.py"] --> DSP["vitals_dsp.py<br/>flicker removal, wall<br/>regression, POS · CHROM · green"]
+        DSP --> NET["vitals_net.py<br/>neural network:<br/>P(heart rate), confidence"]
+        NET --> TR["vitals_stream.py<br/>tracker"]
     end
     FX -- "per-frame features<br/>(batched)" --> LS
-    TR -- "BPM, signal quality,<br/>lighting advice" --> UI["Dashboard<br/>(Canvas 2D)"]
+    TR -- "BPM, confidence,<br/>lighting advice" --> UI["Dashboard<br/>(Canvas 2D)"]
 ```
 
 The desktop app uses the same Python modules, with OpenCV and MediaPipe
@@ -92,20 +113,98 @@ webcam 1280x720 -> FaceMesh on a 640-wide copy (fast)
        -> mean colour of the whole face at full resolution (outline minus eyes,
           brows and lips; glare dropped), plus 16 small patches for the SNR map
        -> rolling 15 s buffer (bridges face-detection gaps < 1 s, blanks fast-motion frames)
-       -> nuisance regression: remove what the background wall (room light) explains
-       -> POS (green only if its spectrum is clearly cleaner, by 6 dB)
-       -> 0.7-4 Hz band -> FFT peak with harmonic check -> SNR
-       -> cross-check: POS, CHROM and green each find their own peak; if no
-          second method agrees (within 5 BPM) the estimate is not trusted
+       -> if frames were dropped: fit and remove light flicker at the true frame times
+       -> neural network (vitals_net.py) on face + 16 patches + wall:
+          probability for every heart rate 40-180 BPM -> peak = estimate,
+          probability within 5 BPM of it = confidence; plus a pulse waveform
        -> tracker: acquiring / locked / holding / lost -> dashboard
-          (first estimate after 8 s of data; a new number is shown dimmed as
-          "settling" until it has lasted 6 s and passed a stricter check)
+          (first estimate after 6 s of data; a new number is shown dimmed as
+          "settling" until it has lasted 6 s and the network is 80% sure)
+```
+
+The hand-made pipeline (wall regression, POS, FFT peak, SNR, three methods
+cross-checked) still runs: its spectrum and method agreement are on the
+dashboard, the **Classic** button uses it, and it is the fallback if the
+weights are missing.
+
+## The model
+
+**Why.** On real recordings the hand-made pipeline was often confidently
+wrong: strong periodic components in the video locked its estimate, and no
+hand-written check (SNR, agreement between methods or face regions,
+stability, peak dominance) told right readings from wrong ones. That is a
+pattern-recognition problem, so a network learns it from examples.
+
+**Data.** [MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)
+(CC BY 4.0): people filmed for 3 minutes at rest and after exercise, with a
+finger PPG sensor synchronised to every frame. `build_mcd_dataset.py`
+downloads each frontal-webcam recording, extracts the per-frame features
+exactly as the app measures them, keeps those (~1 MB) and deletes the video:
+1,080 recordings of 540 people in ~5 h on 4 CPU cores. People are split once,
+with a fixed seed, so no person is in two sets:
+
+| Split | People | Recordings | Used for |
+| --- | --- | --- | --- |
+| train | 400 | 800 | training |
+| validation | 40 | 80 | choosing the model, its size, the tracker thresholds and the start time |
+| test | 100 | 200 | one final run, after everything was fixed |
+
+**Network** (74k weights, numpy at inference):
+
+```
+input, 6-15 s window at 30 Hz, 75 channels:
+  RGB of the whole face, 16 skin patches and the background wall (relative change, band-passed)
+  + POS, CHROM and green signals of the face (hand-made hints)
+  + a flag per trace for "missing"
+-> 1x1 colour mixing (a learned, many-channel POS)
+-> 5 residual blocks of dilated temporal convolutions (dilation 1-16)
+-> waveform head: the pulse (trained to match the finger PPG, Pearson loss)
+-> spectral head: FFT of every feature channel, mapped onto a 40-180 BPM grid,
+   mixed across channels and neighbouring bins -> softmax over heart rates
+   (trained with cross-entropy against a Gaussian around the PPG's heart rate)
+```
+
+**Training** (`train_net.py`, PyTorch on CPU, 30 epochs, ~2 h): random
+windows of 6-15 s; time-stretching of input and PPG together (heart rates
+~45-170 BPM although most people here were 60-120), colour gains, camera
+noise, coloured light flicker added to face and wall alike (so the network
+learns that what the wall does is not a pulse), and dropped patches.
+BatchNorm is folded into the convolutions at export; a test checks that the
+numpy forward pass matches PyTorch to 1e-4 on a committed fixture.
+
+<p align="center"><img src="docs/model/training_curve.png" alt="Validation accuracy per training epoch: the network rises from 61% to 76% of 15 s windows within 5 BPM and from 50% to 67% of 8 s windows, against flat lines for the hand-made pipeline at 57% and 46%" width="720"></p>
+
+**Confidence you can use.** On the test split, the network's confidence
+matches how often it is right:
+
+| Network confidence | 15 s windows | Within 5 BPM of the sensor |
+| --- | --- | --- |
+| below 30% | 649 | 25% |
+| 30-50% | 2090 | 40% |
+| 50-70% | 1841 | 58% |
+| 70-90% | 1648 | 74% |
+| 90% and above | 5096 | **95%** |
+
+The tracker shows a number from 40% confidence, keeps it above 30%, and
+marks it steady at 80% ([`docs/model/tracker_validation.md`](docs/model/tracker_validation.md):
+the sweep, on validation people only).
+
+**Reproduce:**
+
+```bash
+pip install -r requirements-train.txt
+python build_mcd_dataset.py --out mcd_features --jobs 4                  # ~5 h, ~1.3 GB kept
+python train_net.py --data mcd_features --workers 1                      # -> vitals_net_weights.npz, ~2 h
+python tune_tracker.py --data mcd_features                                # tracker thresholds (validation)
+python compare_net.py --data mcd_features --split test --out docs/validation/net_test
+python dropped_frames.py --data mcd_features                              # flicker vs dropped frames
 ```
 
 ## Tech stack
 
 | Area | Tools |
 | --- | --- |
+| Machine learning | PyTorch (training, CPU), numpy inference in the browser |
 | Signal processing | Python, NumPy, SciPy (desktop) / `signal_lite.py` (browser) |
 | Computer vision | MediaPipe Face Landmarker (web), MediaPipe FaceMesh + OpenCV (desktop) |
 | Web | Vanilla JavaScript (ES modules), Web Workers, Pyodide, Canvas 2D, no framework |
@@ -141,7 +240,7 @@ python vitals_app.py
 Options: `--res 640x480`, `--no-motion-correction`, `--no-background` (run the
 analysis inline instead of in a background process).
 
-Keys: `v` liveness check, `q` quit, `m` method (auto / pos / green), `b`
+Keys: `v` liveness check, `q` quit, `m` method (auto / classic / pos / green), `b`
 background cancellation, `l` light mode (white full-screen so the screen lights
 your face), `r` patch SNR map, `p` performance readout, `s` start/stop recording
 (average colours per frame only, never images).
@@ -172,6 +271,13 @@ node web/build.mjs && node tests/browser_check.mjs cam.y4m   # the web app, with
 | `face_layout.py` | Face regions, patch grid, thresholds, lighting coach (no OpenCV, so the browser can use it) |
 | `web/` | Browser version (Vercel): camera + MediaPipe in JS, the Python analysis via Pyodide |
 | `vitals_dsp.py` | All signal processing (no camera code, fully testable) |
+| `vitals_net.py` | The neural network: input preparation and numpy inference (runs in the browser) |
+| `vitals_net_weights.npz` | Its trained weights (280 KB) |
+| `train_net.py` | Trains it in PyTorch on the train split, selects on validation |
+| `build_mcd_dataset.py` | Builds per-frame features for 540 MCD-rPPG people, with the fixed person-level splits |
+| `compare_net.py` | Network vs hand-made pipeline on a split: windows, the replayed screen, bootstrap intervals by person |
+| `tune_tracker.py` | Sweeps the tracker's confidence thresholds on the validation split |
+| `dropped_frames.py` | Accuracy when camera frames are dropped, with and without flicker removal |
 | `frame_features.py` | Per-frame skin colours, wall, head pose and motion, shared by the app and the video tools |
 | `evaluate_video.py` | Accuracy on videos with a reference (MCD-rPPG, UBFC-rPPG, test videos, your own clips) |
 | `fetch_mcd_rppg.py` | Downloads a random, reproducible sample of the public MCD-rPPG dataset for `evaluate_video.py` |
@@ -186,7 +292,7 @@ node web/build.mjs && node tests/browser_check.mjs cam.y4m   # the web app, with
 | `synthetic_benchmark.py` | Per-window ablation on simulated lighting scenarios |
 | `session_benchmark.py` | End-to-end test of what the screen shows on simulated 2-minute sessions |
 | `tests/` | Unit and end-to-end tests (run in CI on every push), `browser_check.mjs` for the web app |
-| `docs/` | Demo GIF and the published validation results |
+| `docs/` | Demo GIF, the published validation results and the model's training record |
 
 ## How the web version works
 
@@ -218,6 +324,60 @@ Not in the web version yet: the liveness check and recording.
 
 Accuracy is measured the way rPPG research does it: run the pipeline on
 videos recorded together with a contact sensor and compare, window by window.
+
+### The network on 100 held-out people
+
+Test split of [MCD-rPPG](#results-on-real-people-mcd-rppg): 100 people, 200
+recordings, none seen in training or used for any choice. Run once
+([`docs/validation/net_test/`](docs/validation/net_test/)). 95% intervals
+resample people, since windows of one person are not independent.
+
+**Every window** (no tracker, the usual way rPPG papers report):
+
+| Window | Pipeline | MAE (BPM) [95% CI] | Within 5 BPM [95% CI] | RMSE | Pearson r |
+| --- | --- | --- | --- | --- | --- |
+| 15 s | **network** | **5.48** [4.43-6.67] | **72%** [66-77%] | 11.4 | 0.69 |
+| 15 s | hand-made | 10.34 [8.46-12.24] | 57% [50-65%] | 18.3 | 0.44 |
+| 8 s | **network** | **6.99** [5.98-8.03] | **64%** [59-69%] | | |
+| 8 s | hand-made | 12.48 [10.74-14.33] | 48% [41-54%] | | |
+
+**What the app shows** (every recording replayed second by second through
+the app's own buffer and tracker):
+
+| | Network | Hand-made |
+| --- | --- | --- |
+| steady number on screen | 65% of the time | 50% |
+| steady numbers within 5 BPM | **85%** | 67% |
+| steady numbers: MAE / RMSE / r | **3.0** / 7.8 BPM / 0.83 | 6.6 / 12.9 BPM / 0.61 |
+| "settling" numbers within 5 BPM | 52% | 56% |
+| first number (median) | **7.0 s** | 10.0 s |
+| a number within 15 s | **96%** | 66% |
+
+At rest and after exercise it is equally good (15 s windows within 5 BPM:
+71% and 72%). Light still matters, but much less:
+
+| Face brightness (of 255) | Recordings | Network: within 5 BPM | Hand-made |
+| --- | --- | --- | --- |
+| below 80 (dim) | 48 | **61%** | 34% |
+| 80-95 | 76 | **73%** | 66% |
+| 95 and above (bright) | 76 | **77%** | 64% |
+
+**Dropped frames** (validation split, [`dropped_frames.md`](docs/validation/dropped_frames.md)):
+with 30% of frames dropped at random, the network stays at 70% of windows
+within 5 BPM (75% with every frame) thanks to the flicker removal; without
+it, 56%.
+
+**Where it still fails.** 38 of 200 test recordings are still off by more
+than 10 BPM on average (hand-made: 89). The worst are the dimmest faces
+(brightness 28-59 of 255) and a few people whose recordings lock onto a
+periodic component that is not the pulse, which the network then usually
+flags with low confidence rather than showing.
+
+### Before the network: the hand-made pipeline
+
+The results below are from the hand-made pipeline, on the earlier
+development (15 people) and test (16 people) sets, which are now part of
+the validation and test splits.
 
 ### Results on real people (MCD-rPPG)
 
@@ -325,6 +485,17 @@ it:
    67%). The test set was used to choose this two-step design over a single
    lower bar, which showed more numbers but more wrong ones.
 
+7. **A trained network instead of more rules.** Item 6 showed the limit:
+   nothing in the hand-made pipeline knew when it was wrong. A network
+   trained on 400 other people, with a calibrated confidence, halved the
+   error on 100 held-out people. See [The model](#the-model).
+8. **Flicker and dropped frames.** Running the web app on a held-out video
+   read 87 BPM as ~110: the dataset's room light flickers at 10 Hz (to a
+   30 fps camera), and dropped frames mix it into the heart-rate band. The
+   flicker is now fitted at the true frame times and removed before
+   resampling. Found by the browser check, not by the offline evaluation,
+   which never drops frames.
+
 Things that did **not** help and were left out: per-window confidence
 checks (whether forehead and cheeks agree, whether the estimate is stable,
 how dominant the main peak is: none told right from wrong readings apart
@@ -332,14 +503,11 @@ much better than chance), a stricter tracker (it hid
 more readings, but the share of wrong ones stayed the same), penalising
 frequencies seen on the background wall, and different patch weightings.
 
-**Where it still fails.** A third of the development recordings and half of
-the test recordings are still off by more than 10 BPM per window on average.
-Many lock onto a strong periodic component that is not the pulse (e.g. person 3196: ~62 BPM on every
+**Where the hand-made pipeline failed** (the reason for the network). A third of the development recordings and half of
+the test recordings were off by more than 10 BPM per window on average.
+Many locked onto a strong periodic component that is not the pulse (e.g. person 3196: ~62 BPM on every
 part of the face, while the finger sensor reads 75-80 and an ECG 73). Being
-confidently wrong is the remaining problem, so the next step is detecting
-these artefacts rather than raising thresholds. The dataset's paper reports
-3.8 BPM for plain POS on this camera (their protocol, not 15 s windows), so
-the gap is narrower but not closed.
+confidently wrong was the problem the network was built to solve.
 
 ### Synthetic test videos
 
@@ -360,9 +528,16 @@ correct: that is why the three methods are cross-checked.
 
 `tests/browser_check.mjs` runs the built web app in headless Chromium with a
 dataset video as the webcam, so the browser path (MediaPipe in JavaScript,
-Python in Pyodide, the dashboard) is checked on real footage too. On subject
-1020 at rest it showed 68-75 BPM ("good signal") while the sensor read
-73-77 BPM.
+the network and the Python in Pyodide, the dashboard) is checked on real
+footage too. On test-split person 4187 at rest it showed a first number
+after ~7 s of face time and then 67-72 BPM ("good signal", network up to
+99% sure) while the sensor read 70-74 BPM; one full analysis, network
+included, takes ~200 ms in the browser on a CPU-only headless machine (the
+update interval is 500 ms). The same check on another held-out person, in
+a room with strong 10 Hz flicker, is how the dropped-frames problem above
+was found: on this CPU-only machine the page drops ~25% of frames, and that
+recording still reads too high there, with low confidence, so the app
+mostly shows "--". A laptop with a GPU drops far fewer frames.
 
 ## What this project deliberately does not measure
 
@@ -426,8 +601,17 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 * **Skin tone.** Melanin absorbs light, so darker skin reflects a weaker pulse
   signal. In simulation, darker skin gets a number on screen far less often
   (it shows "--" rather than guessing). This is a known weakness of camera-based
-  rPPG generally, not just this project. How large the gap is in practice will
-  be measured with real recordings (see [Roadmap](#roadmap)).
+  rPPG generally, not just this project. MCD-rPPG does not record skin tone,
+  so the network's training and test data cannot show how large the gap is,
+  and its training data may not cover all skin tones well (see [Roadmap](#roadmap)).
+* **One dataset, one camera.** The network was trained and tested on one
+  dataset: one recording setup and room type, people sitting still, recorded
+  in one country, compressed 640x480 webcam video. The test split measures
+  how it does on new people in that setup, not on every webcam and room.
+* **Dropped frames with strong flicker.** Removing the flicker recovers most
+  of the accuracy lost to dropped frames, not all of it (70% vs 75% of
+  windows within 5 BPM). Training with dropped frames would close more of
+  the gap.
 * **Lighting and motion.** Dim light raises camera noise; movement corrupts the
   signal. The app tells you which one it sees, and it refuses to show a number
   when the signal is too weak.
@@ -438,18 +622,16 @@ OLED phone, a matte photo under a lamp) still need testing in person.
   Large turns, talking with big jaw movement and walking are out of scope.
 * **Lag.** The number describes roughly the last 15 seconds, so it reacts to
   changes with a delay of several seconds.
-* **One real dataset so far.** The real-data numbers come from one recording
-  setup (one room and lighting, people sitting still, recorded in one country). The
-  simulated benchmarks generate data from the same physics the methods
-  assume, which flatters them; they test that the code does what it is
-  designed to do, not accuracy.
+* **Simulated benchmarks.** They generate data from the same physics the
+  hand-made methods assume, which flatters them; they test that the code
+  does what it is designed to do, not accuracy.
 
 ## Roadmap
 
-* **Detect non-pulse periodic artefacts** (the remaining failure mode, see
-  [Validation](#validation)), then the full MCD-rPPG set (600 people, three
-  cameras), UBFC-rPPG, dim rooms and a wider range of skin tones.
-* **Breathing rate** from the same signal (0.1-0.5 Hz band).
+* **More varied training data**: the other MCD-rPPG cameras, UBFC-rPPG and
+  other public sets, dim rooms and a wider, measured range of skin tones;
+  training with dropped frames.
+* **Breathing rate and beat-to-beat timing** from the network's waveform head.
 * Liveness check and recording in the web version.
 
 ## Author

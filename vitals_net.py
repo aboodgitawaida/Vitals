@@ -16,7 +16,7 @@ hand-made hints. Output:
   * a probability for every heart rate from 40 to 180 BPM. Its peak is the
     estimate; the probability within 5 BPM of the peak is the confidence.
 
-Network, ~70k weights:
+Network, 74k weights (hidden width 48):
   1x1 colour mixing (a learned, many-channel POS) -> 5 residual blocks of dilated
   temporal convolutions -> waveform head (1x1)
                         -> spectral head: power spectrum of every feature channel,

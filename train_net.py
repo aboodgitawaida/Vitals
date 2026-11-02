@@ -2,7 +2,7 @@
 train_net.py -- train vitals_net (see vitals_net.py) on MCD-rPPG features. PyTorch, CPU is enough.
 
     python build_mcd_dataset.py --out mcd_features            # per-frame features + PPG for ~540 people
-    python train_net.py --data mcd_features --epochs 40       # -> vitals_net_weights.npz
+    python train_net.py --data mcd_features --workers 1       # -> vitals_net_weights.npz (~2 h on 4 cores)
 
 Training uses only the 'train' people, and model selection only the 'validation'
 people (splits.json). The 'test' people are never read here.
@@ -276,10 +276,10 @@ def evaluate(net, windows):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="mcd_features")
-    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--steps", type=int, default=250, help="batches per epoch")
     ap.add_argument("--batch", type=int, default=48)
-    ap.add_argument("--hidden", type=int, default=32)
+    ap.add_argument("--hidden", type=int, default=48)
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--wave-weight", type=float, default=0.5)
     ap.add_argument("--workers", type=int, default=3)
