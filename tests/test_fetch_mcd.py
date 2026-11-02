@@ -39,3 +39,39 @@ def test_ground_truth_round_trip(tmp_path):
     assert len(times) == len(wave) == len(hr) == len(t)
     assert abs(times[-1] - t[-1]) < 1e-3
     assert abs(reference_bpm(times, wave, 30.0) - bpm) < 2.0
+
+
+def _meta(fps, n, start="2023-11-30 15:43:29.600000"):
+    from datetime import datetime, timedelta
+    t0 = datetime.fromisoformat(start)
+    return "\n" + "\n".join(f"{i + 1}  {t0 + timedelta(seconds=i / fps)}" for i in range(n)) + "\n"
+
+
+def test_true_fps_from_frame_timestamps():
+    from fetch_mcd_rppg import true_fps
+    assert abs(true_fps(_meta(29.97, 900)) - 29.97) < 0.01
+    assert abs(true_fps(_meta(24.0, 600)) - 24.0) < 0.01
+
+
+def test_retime_fixes_a_wrong_header_rate(tmp_path, monkeypatch):
+    """A 30 fps video whose header said 24: features and reference move to the true times together."""
+    import build_mcd_dataset as b
+    from fetch_mcd_rppg import read_fps
+    n, bpm = 30 * 40, 72.0
+    folder = tmp_path / "1234_before"
+    folder.mkdir()
+    t_true = np.arange(n) / 30.0
+    np.savez_compressed(folder / "features.npz", t=np.arange(n) / 24.0, face=np.ones(n, bool),
+                        moving=np.zeros(n, bool), background=np.zeros((n, 3)), pose=np.zeros((n, 5)))
+    sync = "\n".join(f"{500 + 40 * np.sin(2 * np.pi * bpm / 60 * x):.1f} 0.001" for x in t_true)
+    files = {"meta/x.txt": _meta(30.0, n + 20), "ppg_sync/x.txt": sync}
+    monkeypatch.setattr(b, "fetch_text", files.__getitem__)
+    row = {"meta": "meta/x.txt", "ppg_sync": "ppg_sync/x.txt", "pulse": "70"}
+    name, status = b.retime((row, str(folder)))
+    assert "true 30.00" in status, status
+    assert abs(read_fps(str(folder)) - 30.0) < 0.05
+    f = b.load_features(str(folder))
+    assert abs(f["t"][-1] - t_true[-1]) < 0.05
+    times, wave, _ = read_ground_truth(folder / "ground_truth.txt")
+    assert abs(reference_bpm(times, wave, 30.0) - bpm) < 2.0
+    assert b.retime((row, str(folder)))[1] == "done already"
