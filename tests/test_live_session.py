@@ -5,7 +5,7 @@ import json
 import numpy as np
 
 from face_layout import PATCHES
-from live_session import MIN_SEC, LiveSession
+from live_session import LiveSession, start_sec
 from session_benchmark import make_session
 
 STATS = {"luminance": {"forehead": 150.0, "left cheek": 140.0, "right cheek": 145.0}, "clipped_fraction": 0.0}
@@ -40,7 +40,7 @@ def test_finds_the_simulated_heart_rate():
 def test_collecting_then_first_reading():
     s = make_session("lighter", 0.4, np.random.default_rng(4), seconds=12, events=False)
     infos = play(LiveSession(), s)
-    early = [i for t, i in infos if t < MIN_SEC - 0.5]
+    early = [i for t, i in infos if t < start_sec("auto") - 0.5]   # 6 s with the network, else 8 s
     assert all(i["bpm"] is None and i["status"].startswith("Hold still") for i in early)
     assert any(i["bpm"] is not None for t, i in infos)
 

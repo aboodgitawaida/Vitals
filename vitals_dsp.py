@@ -61,6 +61,78 @@ def resample_uniform(times, values, fs=FS):
     return t_u, np.column_stack([np.interp(t_u, t, v[:, c]) for c in range(v.shape[1])])
 
 
+# Light flicker vs dropped frames. Lights on 50 Hz mains flicker at 100 Hz; a
+# 30 fps camera sees that as a strong tone (10 Hz in the MCD-rPPG recordings,
+# ~2500x the pulse's power in the face colour). With evenly spaced frames it
+# stays at 10 Hz and the band-pass removes it. When frames are dropped (a busy
+# browser tab, a 30 -> 24 fps conversion), interpolating across the gaps mixes
+# it down into the heart-rate band: a 30 -> 24 fps clip of a person at 87 BPM
+# read 108 BPM. So before resampling uneven frames, the strongest tone above
+# the heart-rate band is fitted at the real frame times and subtracted.
+DEFLICKER = True
+FLICKER_MIN_HZ = 4.5       # above the highest heart rate (3 Hz) with room to spare
+FLICKER_TONES = 2          # e.g. the 100 Hz flicker and its 200 Hz harmonic, both folded
+
+
+def frames_uneven(t, ratio=1.5):
+    """True if some frame gap is clearly longer than the usual one (dropped frames)."""
+    d = np.diff(t)
+    return len(d) > 10 and d.max() > ratio * np.median(d)
+
+
+def flicker_hz(t, x):
+    """Frequency of the strongest tone in x (N,) between FLICKER_MIN_HZ and half the frame rate, or None."""
+    nyquist = 0.5 / np.median(np.diff(t))
+    if nyquist < FLICKER_MIN_HZ + 0.5:
+        return None
+    tt = t - t[0]
+    xc = x - np.polyval(np.polyfit(tt, x, 1), tt)
+    freqs = np.arange(FLICKER_MIN_HZ, nyquist, 0.02)
+    phase = 2 * np.pi * np.outer(freqs, tt)
+    power = (np.cos(phase) @ xc) ** 2 + (np.sin(phase) @ xc) ** 2
+    return float(freqs[np.argmax(power)])
+
+
+def remove_tone(t, values, hz):
+    """Least-squares fit of a sinusoid at hz (plus offset and trend) to each column; subtract the sinusoid."""
+    tt = t - t[0]
+    X = np.column_stack([np.cos(2 * np.pi * hz * tt), np.sin(2 * np.pi * hz * tt), np.ones_like(tt), tt])
+    ok = ~np.isnan(values).reshape(len(t), -1).any(axis=1)       # missing rows (NaN) stay missing
+    if ok.sum() < 10:
+        return values
+    out = values.copy()
+    coef = np.linalg.lstsq(X[ok], values[ok], rcond=None)[0]
+    out[ok] = values[ok] - X[ok, :2] @ coef[:2]
+    return out
+
+
+def deflicker(t, patch_traces, background=None):
+    """
+    Remove light flicker from uneven frames before they are resampled (see above).
+    The tone is found on the whole-face trace (or the first usable one) and
+    removed from every trace and the wall. Even frames: returned unchanged.
+    """
+    if not DEFLICKER or not frames_uneven(t):
+        return patch_traces, background
+    out = {n: (None if v is None else np.asarray(v, dtype=float)) for n, v in patch_traces.items()}
+    bg = None if background is None else np.asarray(background, dtype=float)
+    ref = out.get(FACE_TRACE)
+    if ref is None or np.isnan(ref).any():
+        ref = next((v for v in out.values() if v is not None and not np.isnan(v).any()), None)
+    if ref is None:
+        return patch_traces, background
+    ref = ref.mean(axis=1)                       # a tone this strong shows in every colour channel
+    for _ in range(FLICKER_TONES):
+        hz = flicker_hz(t, ref)
+        if hz is None:
+            break
+        ref = remove_tone(t, ref, hz)
+        out = {n: (None if v is None else remove_tone(t, v, hz)) for n, v in out.items()}
+        if bg is not None:
+            bg = remove_tone(t, bg, hz)
+    return out, bg
+
+
 def bandpass(x, low_hz, high_hz, fs=FS, order=3):
     """
     Keep only frequencies between low_hz and high_hz (Butterworth filter).
@@ -250,6 +322,15 @@ MIN_LEVEL = 2.0          # a colour channel averaging below this (of 255) is too
                          # (e.g. a forehead patch covered by black hair): skipped, not divided by ~0
 GREEN_MARGIN_DB = 6.0    # auto mode: green must beat POS by this much (dB) to be used. On real
                          # recordings green was rarely better and often fooled by noise.
+USE_NET = True           # "auto" uses the trained network when its weights are shipped
+
+
+def use_net():
+    import os
+    return USE_NET and os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "vitals_net_weights.npz"))
+
+
 METHODS = {"pos": pos_pulse, "chrom": chrom_pulse, "green": lambda rgb, fs=FS: green_pulse(rgb)}
 AGREE_BPM = 5.0          # two methods "agree" when their peaks are this close
 
@@ -340,7 +421,9 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     patch_traces:   {patch name: (N, 3) mean RGB per frame, NaN rows = missing}. An entry
                     named FACE_TRACE (whole face) is used as the pulse signal when usable.
     background:     (N, 3) mean RGB of the background wall, or None
-    method:         "auto" (try both, keep cleaner), "pos" or "green"
+    method:         "net" (the trained network, vitals_net.py), "auto" (the network when its
+                    weights are present and USE_NET is on, else "classic"), "classic" (the
+                    hand-made pipeline: POS or green, whichever is cleaner), "pos" or "green"
     prev_bpm:       last confident reading, for tracking (or None)
     green_margin_db: in auto mode, green must beat POS by this many dB to be
                     chosen. The app raises it by 3 dB when the head moved during
@@ -376,6 +459,8 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     Returns a dict, or None if no patch had usable data.
     """
     t = np.asarray(times, dtype=float)
+    classic = "auto" if method in ("net", "classic") else method   # the hand-made pipeline always runs
+    patch_traces, background = deflicker(t, patch_traces, background)   # dropped frames + flickering light
 
     # Nuisance references: wall colour (3 signals) and head pose (4 signals).
     references = []
@@ -425,7 +510,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         # Per-patch SNR, for the on-screen SNR map only
         if not patch_map:
             continue
-        map_method = "green" if method == "auto" else method
+        map_method = "green" if classic == "auto" else classic
         f, p = power_spectrum(pulse_signal(rgb_u, map_method, fs), fs)
         patch_snr[name] = snr_db(f, p, pick_peak(f, p, HR_LOW, HR_HIGH), HR_LOW, HR_HIGH)
 
@@ -447,7 +532,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     # The synthetic ablation showed each method failing where the other succeeds.
     prior_hz = prev_bpm / 60.0 if prev_bpm else None
     candidates = []
-    for m in (["pos", "green"] if method == "auto" else [method]):
+    for m in (["pos", "green"] if classic == "auto" else [classic]):
         fused = pulse_signal(pulse_rgb, m, fs)
         fused = fused / (fused.std() + 1e-12)
         freqs, power = power_spectrum(fused, fs)
@@ -468,8 +553,21 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         method_bpm[m] = 60.0 * pick_peak(fq, pw, HR_LOW, HR_HIGH, harmonics=use_harmonics)
     agreement = sum(1 for b in method_bpm.values() if abs(b - f0 * 60.0) <= AGREE_BPM)
 
+    confidence = posterior = None
+    if method == "net" or (method == "auto" and use_net()):
+        import vitals_net                                  # numpy only; loaded on first use
+        if t[-1] - t[0] >= vitals_net.MIN_WINDOW_SEC - 0.5:
+            x = vitals_net.prepare(t, patch_traces, background)
+            if x is not None:
+                est = vitals_net.estimate(x)
+                f0, used, confidence, posterior = est["bpm"] / 60.0, "net", est["confidence"], est["posterior"]
+                fused = est["pulse"] / (est["pulse"].std() + 1e-12)
+                agreement = sum(1 for b in method_bpm.values() if abs(b - f0 * 60.0) <= AGREE_BPM)
+
     return {
         "bpm": f0 * 60.0,
+        "confidence": confidence,            # network only: P(within 5 BPM), else None
+        "posterior": posterior,              # network only: probability per BPM (vitals_net.BPM_BINS)
         "snr_db": snr,
         "method_used": used,
         "pulse": fused,

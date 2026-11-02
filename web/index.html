@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Vitals: heart rate from your webcam</title>
-  <meta name="description" content="Measure your heart rate from an ordinary webcam. Remote photoplethysmography (rPPG) running entirely in your browser: MediaPipe face tracking in JavaScript, signal processing in Python via WebAssembly. Nothing is uploaded.">
+  <meta name="description" content="Measure your heart rate from an ordinary webcam. Remote photoplethysmography (rPPG) running entirely in your browser: MediaPipe face tracking in JavaScript; a neural network trained on 400 people and signal processing in Python via WebAssembly. Nothing is uploaded.">
   <meta name="author" content="Abood Awaida">
   <meta name="theme-color" content="#121416">
   <link rel="canonical" href="https://vitals-track.vercel.app/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Vitals">
   <meta property="og:title" content="Vitals: heart rate from your webcam">
-  <meta property="og:description" content="Camera-based heart-rate estimation (rPPG) that runs entirely in your browser. Python signal processing via WebAssembly, no uploads.">
+  <meta property="og:description" content="Camera-based heart rate (rPPG) that runs entirely in your browser: a neural network trained on 400 people, in Python via WebAssembly. No uploads.">
   <meta property="og:url" content="https://vitals-track.vercel.app/">
   <meta property="og:image" content="https://vitals-track.vercel.app/og.png">
   <meta property="og:image:width" content="1200">
@@ -45,8 +45,8 @@
       <div class="hero-text">
         <h1>Your heart rate, from an ordinary webcam.</h1>
         <p class="lead">Each heartbeat changes your skin's colour very slightly, too little to see.
-          Vitals tracks your face, measures that colour across your skin, removes what room light
-          explains, and finds the rhythm. No wearable, no upload.</p>
+          Vitals tracks your face, measures that colour across your skin, and a small neural network
+          trained on 400 people finds the rhythm. No wearable, no upload.</p>
         <div class="cta">
           <button id="start" class="primary">Start camera</button>
           <span class="muted small">Free, no sign-up. Video never leaves this tab.</span>
@@ -67,13 +67,14 @@
       </article>
       <article class="feature">
         <h2>Python in the browser</h2>
-        <p>The signal processing is the project's own Python, run unchanged in a Web Worker with
-           Pyodide (WebAssembly). The same code powers the desktop app and its test suite.</p>
+        <p>The network and the signal processing are the project's own Python, run unchanged in a
+           Web Worker with Pyodide (WebAssembly). The same code powers the desktop app and its test suite.</p>
       </article>
       <article class="feature">
-        <h2>Says "--" rather than guess</h2>
-        <p>Three methods (POS, CHROM, green) must agree before a number is shown. Weak light,
-           movement and darker skin give weaker signals, and the page tells you which one it sees.</p>
+        <h2>Knows when it is sure</h2>
+        <p>The network gives a probability for every heart rate, so it can say how sure it is.
+           It shows a number only when it is, and "--" otherwise. Weak light, movement and darker
+           skin give weaker signals, and the page tells you which one it sees.</p>
       </article>
     </div>
 
@@ -81,16 +82,16 @@
       <h2>For the best reading</h2>
       <ol>
         <li>Sit still and face the camera, in good, even light (a window or lamp in front of you).</li>
-        <li>A first number appears after about 10-15 seconds, dimmed while it settles, and describes roughly the last 15.</li>
+        <li>A first number appears after about 7 seconds, dimmed while it settles, and describes roughly the last 15.</li>
         <li>Try <strong>Light mode</strong> in a dim room: the screen turns white and lights your face.</li>
       </ol>
       <p class="muted small">Not a medical device. Not for health, stress or diagnostic use.
-         Tested against a finger pulse sensor on 16 people it was never tuned on: 68% of steady readings within 5 BPM,
+         Tested against a finger pulse sensor on 100 people it never saw in training: 85% of steady readings within 5 BPM,
          best in bright, even light (<a href="https://github.com/aboodgitawaida/Vitals#validation">full results</a>).</p>
     </section>
 
     <section class="stack" aria-label="Built with">
-      <span>Python</span><span>NumPy / SciPy</span><span>Pyodide (WebAssembly)</span>
+      <span>Python</span><span>NumPy / SciPy</span><span>PyTorch (training)</span><span>Pyodide (WebAssembly)</span>
       <span>MediaPipe Face Landmarker</span><span>JavaScript (no framework)</span><span>Canvas 2D</span>
       <span>OpenCV (desktop app)</span><span>pytest + GitHub Actions</span><span>Vercel</span>
     </section>
@@ -118,7 +119,7 @@
       </section>
 
       <section class="panel">
-        <div class="label">PULSE SPECTRUM</div>
+        <div class="label" id="spectrum-label">PULSE SPECTRUM</div>
         <canvas id="spectrum" class="chart"></canvas>
       </section>
 
@@ -135,7 +136,8 @@
 
     <nav class="controls" aria-label="Controls">
       <div class="seg" role="group" aria-label="Method">
-        <button data-method="auto" aria-pressed="true">Auto</button>
+        <button data-method="auto" aria-pressed="true" title="The trained network (falls back to Classic)">Auto</button>
+        <button data-method="classic" aria-pressed="false" title="The hand-made pipeline: POS or green">Classic</button>
         <button data-method="pos" aria-pressed="false">POS</button>
         <button data-method="green" aria-pressed="false">Green</button>
       </div>

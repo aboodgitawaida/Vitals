@@ -162,6 +162,7 @@ WINDOW_METHODS = {          # name: analyze_heart_rate settings
     "green": dict(method="green"),
     "POS": dict(method="pos"),
     "CHROM": dict(method="chrom"),
+    "hand-made pipeline": dict(method="classic"),
     "full pipeline (auto)": dict(method="auto"),
 }
 

@@ -54,8 +54,13 @@ async function init() {
     .then((lock) => fetch(`${PYODIDE_URL}${lock.packages.numpy.file_name}`))
     .then((r) => r.arrayBuffer())
     .catch(() => {});                         // only a speed-up: loadPackage fetches it anyway
-  const sources = fetch("py/manifest.json").then((r) => r.json())
-    .then((files) => Promise.all(files.map(async (name) => [name, await fetchText(`py/${name}`)])));
+  const manifest = fetch("py/manifest.json").then((r) => r.json());
+  const sources = manifest.then((m) => Promise.all(m.modules.map(async (name) => [name, await fetchText(`py/${name}`)])));
+  const data = manifest.then((m) => Promise.all(m.data.map(async (name) => {
+    const res = await fetch(`py/${name}`);
+    if (!res.ok) throw new Error(`could not load ${name}`);
+    return [name, new Uint8Array(await res.arrayBuffer())];
+  })));
   const { loadPyodide } = await import(`${PYODIDE_URL}pyodide.mjs`);
   py = await loadPyodide({ indexURL: PYODIDE_URL });
   postMessage({ type: "status", text: "Loading numpy…" });
@@ -65,6 +70,7 @@ async function init() {
   postMessage({ type: "status", text: "Loading the signal processing…" });
   // The project's own .py files, copied next to this page by build.mjs.
   for (const [name, text] of await sources) py.FS.writeFile(`/home/pyodide/${name}`, text);
+  for (const [name, bytes] of await data) py.FS.writeFile(`/home/pyodide/${name}`, bytes);   // e.g. network weights
   py.runPython(GLUE);
   postMessage({ type: "ready" });
 }
