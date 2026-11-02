@@ -11,10 +11,11 @@
 
 [**Try it live →**](https://vitals-track.vercel.app)
 
-<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard finding a heart rate of 69-74 BPM in a real recording" width="820"></a>
+<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard finding a heart rate of 69-75 BPM in a real recording, first dimmed as settling, then steady" width="820"></a>
 
 <sub>The web app reading a real recording from the MCD-rPPG dataset through a virtual camera:
-69-74 BPM; the finger pulse sensor read 73-77. Dashed line: the skin it measures. Face blurred for privacy.</sub>
+69-75 BPM; the finger pulse sensor read 73-77. A new number is dimmed ("settling") until it is steady.
+Dashed line: the skin it measures. Face blurred for privacy.</sub>
 
 </div>
 
