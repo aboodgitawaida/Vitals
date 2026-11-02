@@ -350,8 +350,8 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
                     named FACE_TRACE (whole face) is used as the pulse signal when usable.
     background:     (N, 3) mean RGB of the background wall, or None
     method:         "net" (the trained network, vitals_net.py), "auto" (the network when its
-                    weights are present and USE_NET is on, else POS or green, whichever is
-                    cleaner), "pos" or "green"
+                    weights are present and USE_NET is on, else "classic"), "classic" (the
+                    hand-made pipeline: POS or green, whichever is cleaner), "pos" or "green"
     prev_bpm:       last confident reading, for tracking (or None)
     green_margin_db: in auto mode, green must beat POS by this many dB to be
                     chosen. The app raises it by 3 dB when the head moved during
@@ -387,7 +387,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     Returns a dict, or None if no patch had usable data.
     """
     t = np.asarray(times, dtype=float)
-    classic = "auto" if method == "net" else method        # the hand-made pipeline always runs too
+    classic = "auto" if method in ("net", "classic") else method   # the hand-made pipeline always runs
 
     # Nuisance references: wall colour (3 signals) and head pose (4 signals).
     references = []

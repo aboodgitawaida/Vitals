@@ -26,10 +26,11 @@ MIN_SEC = 8              # first estimate after 8 s: on real recordings shorter 
                          # only ~40% of the time (see HeartRateTracker). Keep in sync with simulate_display.
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
+CONF_GOOD = 0.8          # network confidence at or above: "good signal"
 FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
 TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than this over 1 s = talking
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
-METHODS = ["auto", "pos", "green"]
+METHODS = ["auto", "classic", "pos", "green"]   # auto: the trained network when shipped (vitals_dsp)
 TREND_SEC = 60           # length of the trend chart
 
 
@@ -170,7 +171,9 @@ class LiveSession:
             return "none"
         if r.state == "holding":
             return "fair"
-        # "Good" needs a clean spectrum AND all three methods agreeing.
+        # Network: "good" when it is confident. Otherwise a clean spectrum AND all three methods agreeing.
+        if a is not None and a.get("confidence") is not None:
+            return "good" if a["confidence"] >= CONF_GOOD else "fair"
         good = a is not None and a["snr_db"] >= SNR_GOOD_DB and a["agreement"] == 3
         return "good" if good else "fair"
 
@@ -187,6 +190,7 @@ class LiveSession:
             "regions": {k: [_num(s), float(w)] for k, (s, w) in region_summary(a).items()},
             "snr_db": None, "method_used": None, "agreement": None, "peak_bpm": None,
             "motion_patches": None, "patch_snr": {}, "spectrum": None, "pulse": None, "source": None,
+            "confidence": None, "posterior": None,
         }
         if a is not None:
             band = (a["freqs"] >= HR_LOW - 0.2) & (a["freqs"] <= HR_HIGH + 0.2)
@@ -194,6 +198,9 @@ class LiveSession:
                 "snr_db": _num(a["snr_db"]), "method_used": a["method_used"],
                 "agreement": int(a["agreement"]), "peak_bpm": _num(a["bpm"]),
                 "motion_patches": int(a["motion_patches"]), "source": a["source"],
+                "confidence": _num(a.get("confidence")),
+                # Network only: probability per BPM from 40 to 180 (vitals_net.BPM_BINS).
+                "posterior": None if a.get("posterior") is None else [round(float(p), 5) for p in a["posterior"]],
                 "patch_snr": {k: _num(v) for k, v in a["patch_snr"].items()},
                 # Every 4th bin is plenty for a chart and keeps the message small.
                 "spectrum": [(a["freqs"][band][::4] * 60).tolist(), a["power"][band][::4].tolist()],

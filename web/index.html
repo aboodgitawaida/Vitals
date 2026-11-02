@@ -118,7 +118,7 @@
       </section>
 
       <section class="panel">
-        <div class="label">PULSE SPECTRUM</div>
+        <div class="label" id="spectrum-label">PULSE SPECTRUM</div>
         <canvas id="spectrum" class="chart"></canvas>
       </section>
 
@@ -135,7 +135,8 @@
 
     <nav class="controls" aria-label="Controls">
       <div class="seg" role="group" aria-label="Method">
-        <button data-method="auto" aria-pressed="true">Auto</button>
+        <button data-method="auto" aria-pressed="true" title="The trained network (falls back to Classic)">Auto</button>
+        <button data-method="classic" aria-pressed="false" title="The hand-made pipeline: POS or green">Classic</button>
         <button data-method="pos" aria-pressed="false">POS</button>
         <button data-method="green" aria-pressed="false">Green</button>
       </div>
