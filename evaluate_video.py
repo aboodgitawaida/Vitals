@@ -103,15 +103,15 @@ def make_face_mesh():
                                            min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
 
-def extract_features(video_path, face_mesh=None, cache_dir="eval_cache", process_width=640):
+def extract_features(video_path, face_mesh=None, cache_dir="eval_cache", process_width=640, fps=None):
     """
     Returns dict: t (N,), patches {trace name: (N,3)} (the 16 patches and the whole face),
     background (N,3), face (N,), moving (N,), pose (N,5).
-    Times come from the video's frame rate, not the wall clock.
+    Times come from fps if given (the true frame rate), else the frame rate in the video's header.
     """
     cache = None
     if cache_dir:
-        key = hashlib.sha1(f"{os.path.abspath(video_path)}:{os.path.getsize(video_path)}:{CACHE_VERSION}"
+        key = hashlib.sha1(f"{os.path.abspath(video_path)}:{os.path.getsize(video_path)}:{CACHE_VERSION}:{fps}"
                            .encode()).hexdigest()[:16]
         cache = os.path.join(cache_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}_{key}.npz")
     if cache and os.path.exists(cache):
@@ -121,7 +121,7 @@ def extract_features(video_path, face_mesh=None, cache_dir="eval_cache", process
 
     face_mesh = face_mesh or make_face_mesh()
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps = fps or cap.get(cv2.CAP_PROP_FPS) or 30.0
     fx = FeatureExtractor()
     t, face, moving, bg, pose = [], [], [], [], []
     patches = {n: [] for n in TRACES}
@@ -204,7 +204,8 @@ def score_video(job):
         ref_fn = lambda te: reference_bpm(gt_t, gt_ppg, te)
     else:
         ref_fn = lambda te: ref_bpm
-    return name, evaluate_subject(extract_features(video), ref_fn)
+    from fetch_mcd_rppg import read_fps                 # MCD-rPPG folders: true frame rate, not the header's
+    return name, evaluate_subject(extract_features(video, fps=read_fps(os.path.dirname(video))), ref_fn)
 
 
 def score_all(jobs, workers):

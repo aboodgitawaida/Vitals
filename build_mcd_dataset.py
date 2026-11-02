@@ -25,7 +25,13 @@ its own frame-synced PPG. "--transform low" moves the frontal video down so the 
 sits at the bottom edge with the chin out of the picture (a laptop camera looked
 down at); --front gives the frontal features, whose head pose sets how far.
 
-Output: <out>/splits.json and <out>/<patient>_<before|after>/{features.npz, ground_truth.txt}
+Frame times come from the true frame rate in the dataset's frame timestamps
+(fetch_mcd_rppg.true_fps), not from the video header, which is wrong for about a
+quarter of the videos. Folders built before that fix are corrected in place,
+without redoing the face tracking:
+    python build_mcd_dataset.py --out mcd_features --retime
+
+Output: <out>/splits.json and <out>/<patient>_<before|after>/{features.npz, ground_truth.txt, fps.txt}
 """
 
 import argparse
@@ -41,7 +47,7 @@ import subprocess
 
 import numpy as np
 
-from fetch_mcd_rppg import CAMERA, choose, download, write_ground_truth
+from fetch_mcd_rppg import CAMERA, choose, download, fetch_text, read_fps, save_fps, true_fps, write_ground_truth
 
 CAMERAS = ("FullHDwebcam", "USBVideo", "IriunWebcam")    # front, left, right
 LOW_NOSE_Y = 0.93          # --transform low: the nose ends up this far down the picture
@@ -86,10 +92,9 @@ def build_one(job):
     tmp = tempfile.mkdtemp(prefix="mcd_")
     try:
         t0 = time.time()
-        sync = os.path.join(tmp, "ppg_sync.txt")
-        download(row["ppg_sync"], sync)
-        with open(sync) as f:
-            write_ground_truth(f.read(), float(row["pulse"] or "nan"), os.path.join(folder, "ground_truth.txt"))
+        fps = true_fps(fetch_text(row["meta"]))
+        write_ground_truth(fetch_text(row["ppg_sync"]), float(row["pulse"] or "nan"),
+                           os.path.join(folder, "ground_truth.txt"), fps)
         video = local_video
         if video is None:
             video = os.path.join(tmp, "vid.avi")
@@ -100,15 +105,40 @@ def build_one(job):
                             f"pad=iw:ih+{shift}:0:{shift}:color=gray,crop=iw:ih-{shift}:0:0",
                             "-c:v", "ffv1", moved], check=True)
             video = moved
-        f = extract_features(video, cache_dir=None)
+        f = extract_features(video, cache_dir=None, fps=fps)
         np.savez_compressed(feats_path + ".part.npz", t=f["t"], background=f["background"], face=f["face"],
                             moving=f["moving"], pose=f["pose"], **{f"p_{n}": v for n, v in f["patches"].items()})
         os.replace(feats_path + ".part.npz", feats_path)
+        save_fps(folder, fps)
         return name, f"{time.time() - t0:.0f} s"
     except Exception as e:                            # one bad recording must not stop a 5-hour run
         return name, f"FAILED: {type(e).__name__}: {e}"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def retime(job):
+    """A folder built from the video header's frame rate -> true frame times. Returns (name, status)."""
+    row, folder = job
+    name = os.path.basename(folder)
+    feats_path = os.path.join(folder, "features.npz")
+    if not os.path.exists(feats_path):
+        return name, "no features"
+    if read_fps(folder):
+        return name, "done already"
+    try:
+        fps = true_fps(fetch_text(row["meta"]))
+        sync = fetch_text(row["ppg_sync"])
+        d = dict(np.load(feats_path))
+        old = 1 / np.median(np.diff(d["t"]))
+        d["t"] = np.arange(len(d["t"])) / fps
+        write_ground_truth(sync, float(row["pulse"] or "nan"), os.path.join(folder, "ground_truth.txt"), fps)
+        np.savez_compressed(feats_path + ".part.npz", **d)
+        os.replace(feats_path + ".part.npz", feats_path)
+        save_fps(folder, fps)                       # last: marks the folder as done
+        return name, f"header {old:.2f} fps -> true {fps:.2f} fps"
+    except Exception as e:
+        return name, f"FAILED: {type(e).__name__}: {e}"
 
 
 def load_features(folder):
@@ -131,6 +161,7 @@ def main():
     ap.add_argument("--splits", default=None, help="reuse this splits.json (same people in each split)")
     ap.add_argument("--transform", choices=["low"], default=None, help="low: face at the bottom edge, chin cut off")
     ap.add_argument("--front", default=None, help="frontal features folder (head pose for --transform low)")
+    ap.add_argument("--retime", action="store_true", help="fix frame times in folders already built (no face tracking)")
     args = ap.parse_args()
     if args.transform and (args.camera != CAMERA or not args.front):
         ap.error("--transform low needs the front camera and --front")
@@ -153,6 +184,15 @@ def main():
     print({k: len(v) for k, v in splits.items() if k != "seed"})
 
     frontal = {(r["patient_id"], r["step"]): r for r in rows if r["camera"] == args.camera}
+    if args.retime:
+        from concurrent.futures import ThreadPoolExecutor   # downloads only: threads are enough
+        names = sorted(n for n in os.listdir(args.out) if os.path.isdir(os.path.join(args.out, n)))
+        jobs = [(frontal[tuple(n.split("_"))], os.path.join(args.out, n)) for n in names
+                if tuple(n.split("_")) in frontal]
+        with ThreadPoolExecutor(16) as ex:
+            for i, (name, status) in enumerate(ex.map(retime, jobs), 1):
+                print(f"{i}/{len(jobs)} {name}: {status}", flush=True)
+        return
     jobs = []
     for split in args.only or ["validation", "train", "test"]:
         for p in splits[split]:
