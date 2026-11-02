@@ -89,3 +89,31 @@ def test_method_and_background_switches():
         pass
     else:
         raise AssertionError("bad method accepted")
+
+
+def test_framing_advice_comes_first_and_is_reported():
+    s = make_session("lighter", 0.4, np.random.default_rng(8), seconds=4, events=False)
+    session = LiveSession()
+    cut_off = dict(STATS, framing={"outside": 0.35, "size": 0.15, "roll": 0.0})   # chin out of the picture
+    for i, now in enumerate(s["t"]):
+        session.frame(now, True, {n: s["patches"][n][i] for n in PATCHES}, s["background"][i], s["pose"][i],
+                      stats=cut_off, fps=30.0)
+    info = session.info()
+    assert info["framing"].startswith("Face partly out of view")
+    assert info["status"] == info["framing"]                     # ahead of "Hold still... collecting"
+    ok = dict(STATS, framing={"outside": 0.0, "size": 0.15, "roll": 0.0})
+    for k in range(20):
+        session.frame(s["t"][-1] + (k + 1) / 30, True, {n: s["patches"][n][-1] for n in PATCHES},
+                      s["background"][-1], s["pose"][-1], stats=ok, fps=30.0)
+    assert session.info()["framing"] is None
+
+
+def test_start_over_records_why():
+    s = make_session("lighter", 0.4, np.random.default_rng(9), seconds=10, events=False)
+    session = LiveSession()
+    play(session, s)
+    t = s["t"][-1]
+    for k in range(1, 45):                                        # 1.5 s without a face
+        session.frame(t + k / 30, False)
+    when, why = session.info()["last_reset"]
+    assert why.startswith("face lost for 1.0") and when > t

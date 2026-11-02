@@ -83,6 +83,30 @@ def assess_lighting(stats, fps):
     return "good", f"Light: good ({brightness:.0f}/255)"
 
 
+# Framing coach. The network was trained on people sitting upright, facing the camera, with
+# the whole face in view (MCD-rPPG: face width 11-20% of the frame, head roll under 0.13 rad
+# for 99% of people). Outside that, say how to sit instead of only "hold still".
+FRAME_OUTSIDE_MAX = 0.10  # share of the face outline outside the picture
+FACE_SIZE_MIN = 0.09      # face width / frame width (smaller: too far for enough skin pixels)
+ROLL_MAX = 0.30           # head tilt (radians, ~17 degrees)
+
+
+def assess_framing(framing):
+    """
+    framing: {"outside", "size", "roll"} from frame_features.face_framing (or features.js).
+    Returns a message saying how to sit, or None when the framing is fine.
+    """
+    if not framing:
+        return None
+    if framing["outside"] > FRAME_OUTSIDE_MAX:
+        return "Face partly out of view - raise the screen or sit back so your whole face is in the picture"
+    if framing["size"] < FACE_SIZE_MIN:
+        return "Face too small - move closer to the camera"
+    if abs(framing["roll"]) > ROLL_MAX:
+        return "Head tilted - face the camera straight on"
+    return None
+
+
 def snr_level(snr):
     if snr is None:
         return "none"

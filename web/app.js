@@ -22,6 +22,7 @@ const SETTLE_CAMERA_MS = 2000;   // let auto exposure / white balance settle, th
 const LEVEL_TEXT = { good: "GOOD SIGNAL", fair: "FAIR SIGNAL", none: "NO READING" };
 const TINT = { good: [110, 220, 120], fair: [250, 195, 60], none: [235, 110, 110] };
 const REJECTED = [170, 70, 200];  // hair, brows, shadow, glare: not used
+const LOG_MAX_SEC = 300;         // "Save session data" keeps the first 5 minutes of a session
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -30,7 +31,7 @@ const state = {
   pending: [], busy: false, info: null, running: false,
   t0: 0, lastFrame: null, fps: 0, method: "auto", background: true, light: false, showMap: true,
   showPerf: false, perf: {}, delegate: null, switching: false, meshFrames: 0,
-  camFps: 0, lastPresented: null
+  camFps: 0, lastPresented: null, log: null
 };
 
 // ---------------------------------------------------------------- startup
@@ -44,7 +45,11 @@ function startWorker() {
       if (m.type === "status") { if (!state.running) setLoad(m.text); }
       else if (m.type === "ready") { ready = true; resolve({ worker: w }); }
       else if (m.type === "info") onInfo(m);
-      else if (m.type === "error") { console.error(m.text); if (!ready) reject(new Error(m.text)); else state.busy = false; }
+      else if (m.type === "error") {
+        console.error(m.text);
+        if (!ready) reject(new Error(m.text));
+        else { state.busy = false; if (state.log) state.log.replies++; }   // keeps the session log's replies in step
+      }
     };
     w.onerror = (e) => reject(new Error(e.message || "worker failed"));
     w.postMessage({ type: "init" });
@@ -153,7 +158,7 @@ function lockCameraSoon(restart = false) {
   lockTimer = setTimeout(async () => {
     if (!state.running) return;
     state.cameraLocked = await setCameraAuto(false);
-    if (restart) { control("reset"); state.extractor?.reset(); }
+    if (restart) { control("reset", undefined, "camera exposure re-locked"); state.extractor?.reset(); }
   }, SETTLE_CAMERA_MS);
 }
 
@@ -248,6 +253,7 @@ async function start() {
   console.log(`camera: ${w}x${h}`);
   state.running = true;
   state.t0 = performance.now();
+  state.log = newLog();
   lockCameraSoon();
   scheduleFrame();
 }
@@ -298,7 +304,7 @@ function onFrame(_ts, video) {
   if (state.lastFrame !== null) {
     const dt = now - state.lastFrame;
     if (dt > GAP_RESET_SEC) {                      // tab was hidden: old samples no longer line up
-      control("reset");
+      control("reset", undefined, `no camera frames for ${dt.toFixed(1)} s`);
       state.extractor.reset();
       state.pending = [];
     } else {
@@ -331,11 +337,14 @@ function onFrame(_ts, video) {
   const ff = state.extractor.process(frame, lm);
   lap("patches");
 
-  state.pending.push({
+  const sample = {
     t: now, face: ff.face, colors: ff.colors, bg: ff.bg_rgb, pose: ff.pose,
     fast: ff.fast_motion, small: ff.small_motion, stats: ff.stats,
     fps: state.lastPresented === null ? state.fps : state.camFps,
-  });
+  };
+  state.pending.push(sample);
+  if (state.log && now <= LOG_MAX_SEC) state.log.frames.push(sample);
+  else if (state.log) state.log.truncated = true;
   flush();
   if (!state.worker) $("status").textContent = "Getting the heart-rate analysis ready… measuring already, hold still";
   drawView(ff);
@@ -364,6 +373,9 @@ function flush() {
   if (state.busy || !state.pending.length || !state.worker) return;
   state.busy = true;
   state.worker.postMessage({ type: "frames", frames: state.pending });
+  // The worker analyses on the last frame of each batch: replay_session.py needs the same batches.
+  const logged = state.pending.filter((f) => f.t <= LOG_MAX_SEC).length;
+  if (state.log && logged) state.log.batches.push(logged);
   state.pending = [];
 }
 
@@ -371,12 +383,57 @@ function onInfo(msg) {
   state.busy = false;
   state.info = msg.info;
   if (msg.ran) timeStage("analysis", msg.ms);
+  const i = msg.info, batch = state.log ? state.log.replies++ : -1;
+  if (state.log && batch < state.log.batches.length) {
+    state.log.screen.push({ batch, bpm: i.bpm, state: i.state, level: i.level, settling: i.settling, confidence: i.confidence,
+                            status: i.status, collected: i.collected_sec, framing: i.framing, last_reset: i.last_reset });
+  }
   renderDashboard(msg.info);
   flush();
 }
 
-function control(action, value) {
-  state.worker?.postMessage({ type: "control", action, value });
+function control(action, value, why) {
+  if (!state.worker) return;                     // Python not loaded yet: nothing to change
+  state.worker.postMessage({ type: "control", action, value });
+  // Applied by the worker after the batch it is on, i.e. before the next batch is sent.
+  state.log?.events.push({ before_batch: state.log.batches.length, t: state.lastFrame, action, value, why });
+}
+
+// ---------------------------------------------------------------- session data (diagnostics)
+
+function newLog() { return { frames: [], batches: [], events: [], screen: [], replies: 0, truncated: false }; }
+
+async function saveSession() {
+  // Per-frame average colours and what the screen showed, never images. Nothing is uploaded:
+  // the file is saved on this computer, and replay_session.py replays it exactly.
+  const log = state.log;
+  if (!log || !log.frames.length) return;
+  const settings = state.stream?.getVideoTracks()[0]?.getSettings?.() || {};
+  let app = null;
+  try { app = await (await fetch("version.json")).json(); } catch {}
+  const ref = parseFloat($("ref-bpm").value);
+  const doc = {
+    format: "vitals-session", format_version: 1, app, saved: new Date().toISOString(),
+    user_agent: navigator.userAgent, delegate: state.delegate, method: state.method,
+    camera: { width: state.grab?.width, height: state.grab?.height, frame_rate: settings.frameRate ?? null,
+              exposure_locked: Boolean(state.cameraLocked) },
+    reference_bpm: Number.isFinite(ref) ? ref : null,
+    ...log,
+  };
+  const round = (_k, v) => (typeof v === "number" && !Number.isInteger(v) ? Math.round(v * 1e4) / 1e4 : v);
+  let blob = new Blob([JSON.stringify(doc, round)], { type: "application/json" });
+  let name = `vitals_session_${doc.saved.slice(0, 19).replace(/[-:]/g, "").replace("T", "_")}.json`;
+  if ("CompressionStream" in window) {
+    blob = await new Response(blob.stream().pipeThrough(new CompressionStream("gzip"))).blob();
+    name += ".gz";
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  $("save").textContent = `Saved ${Math.round(log.frames.length / 30)} s`;
+  setTimeout(() => { $("save").textContent = "Save session data"; }, 3000);
 }
 
 // ---------------------------------------------------------------- drawing
@@ -392,6 +449,17 @@ function drawView(ff) {
   const ctx = state.viewCtx, v = state.view;
   const k = v.width / state.grab.width;
   ctx.drawImage(state.grab, 0, 0, v.width, v.height);
+  if (state.info?.framing) {
+    // Where the face should be: centred, about a third of the picture's height across.
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 8]);
+    ctx.beginPath();
+    ctx.ellipse(v.width / 2, v.height * 0.45, v.height * 0.2, v.height * 0.28, 0, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.restore();
+  }
   if (!state.showMap || !ff.face) return;
   // Patch SNR map: skin pixels tinted by how clean each patch's pulse is; rejected pixels purple.
   const patchSnr = state.info?.patch_snr || {};
@@ -639,7 +707,7 @@ function setLight(on, fullscreen = true) {
   }
   // The camera re-adjusts exposure after a big lighting change: let it, lock again, start fresh.
   if (state.running) setCameraAuto(true).then(() => lockCameraSoon(true));
-  control("reset");
+  control("reset", undefined, `light mode ${on ? "on" : "off"}`);
   state.extractor?.reset();
   if (state.info) renderDashboard(state.info);
 }
@@ -655,6 +723,7 @@ document.querySelectorAll("[data-method]").forEach((b) => b.addEventListener("cl
 $("bg-toggle").addEventListener("click", () => setBackground(!state.background));
 $("light-toggle").addEventListener("click", () => setLight(!state.light));
 $("map-toggle").addEventListener("click", () => setMap(!state.showMap));
+$("save").addEventListener("click", saveSession);
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && state.light) setLight(false, false); });
 document.addEventListener("keydown", (e) => {
   if (!state.running || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -664,6 +733,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "l") setLight(!state.light);
   else if (e.key === "r") setMap(!state.showMap);
   else if (e.key === "p") state.showPerf = !state.showPerf;
+  else if (e.key === "d") saveSession();
 });
 
 preload();

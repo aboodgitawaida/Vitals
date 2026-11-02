@@ -37,6 +37,7 @@ import numpy as np
 
 from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
+from face_layout import assess_framing
 from face_regions import PATCHES, TRACES, assess_lighting, draw_overlay
 from frame_features import FeatureExtractor
 from liveness import CHALLENGE_SEC, LivenessSession
@@ -93,7 +94,7 @@ def start_recording():
     f = open(path, "w", newline="")
     writer = csv.writer(f)
     header = ["time_s"]
-    for name in PATCHES + ["background"]:
+    for name in TRACES + ["background"]:          # TRACES = 16 patches + the whole face (the network needs it)
         header += [f"{name}_r", f"{name}_g", f"{name}_b"]
     # face/moving/state let replay.py reproduce exactly what the screen did.
     writer.writerow(header + ["bpm_shown", "snr_db", "method_used", "light_mode", "face", "moving", "state"]
@@ -138,6 +139,7 @@ def main():
     trend = deque()                                  # (time, bpm or None) for the 60 s trend
     analysis = None
     features = FeatureExtractor()                    # per-frame skin colours, wall, head pose, motion
+    framing_recent = deque(maxlen=15)                # framing advice per recent frame (face_layout)
     talking_level = deque(maxlen=30)                 # mouth opening over the last ~1 s
     method_idx, use_background, light_mode, show_map, show_perf = 0, True, False, True, True
     lighting = ("none", "Light: waiting for face")
@@ -202,6 +204,7 @@ def main():
                 if ff.small_motion:
                     last_small_motion = now
                 talking_level.append(pose[4])
+                framing_recent.append(assess_framing(stats.get("framing")))
 
                 # Fast-motion frames are stored as gaps (filled by interpolation), so a
                 # head turn doesn't poison the next 15 s of windows.
@@ -238,7 +241,10 @@ def main():
                     patch_snr = analysis["patch_snr"] if analysis else {}
                     frame = draw_overlay(frame, regions, patches, patch_snr, bg_boxes)
 
-            if have < start_sec(method):
+            framing = [m for m in framing_recent if m]
+            if len(framing) > 0.6 * framing_recent.maxlen:
+                status = max(set(framing), key=framing.count)       # how to sit comes first
+            elif have < start_sec(method):
                 status = f"Hold still... collecting {have:.0f}/{start_sec(method)} s"
             elif moving:
                 status = "Movement detected - hold still"
@@ -336,7 +342,7 @@ def main():
             # Every frame is written, including frames with no face (empty colours),
             # so replay.py sees exactly the gaps the app saw.
             row = [f"{now:.4f}"]
-            face_colors = [colors[n] for n in PATCHES] if colors is not None else [None] * len(PATCHES)
+            face_colors = [colors.get(n) for n in TRACES] if colors is not None else [None] * len(TRACES)
             for c in face_colors + [bg_rgb]:
                 row += [f"{v:.4f}" for v in c] if c is not None else ["", "", ""]
             row += [f"{bpm:.1f}" if bpm is not None else "", f"{snr:.2f}" if snr is not None else "",
