@@ -17,6 +17,14 @@ People are split once, at random with a fixed seed, and the split is saved:
     python build_mcd_dataset.py --out mcd_features --jobs 4          # ~5 h on 4 cores, ~1.5 GB kept
     python build_mcd_dataset.py --out mcd_features --only validation   # one split
 
+Harder conditions (hard_conditions.py), same people and splits:
+    python build_mcd_dataset.py --out mcd_left --camera USBVideo --splits mcd_features/splits.json --only validation
+    python build_mcd_dataset.py --out mcd_low --transform low --front mcd_features --only validation
+The dataset filmed everyone with three cameras at once (front, left, right), each with
+its own frame-synced PPG. "--transform low" moves the frontal video down so the face
+sits at the bottom edge with the chin out of the picture (a laptop camera looked
+down at); --front gives the frontal features, whose head pose sets how far.
+
 Output: <out>/splits.json and <out>/<patient>_<before|after>/{features.npz, ground_truth.txt}
 """
 
@@ -29,9 +37,14 @@ import shutil
 import tempfile
 import time
 
+import subprocess
+
 import numpy as np
 
 from fetch_mcd_rppg import CAMERA, choose, download, write_ground_truth
+
+CAMERAS = ("FullHDwebcam", "USBVideo", "IriunWebcam")    # front, left, right
+LOW_NOSE_Y = 0.93          # --transform low: the nose ends up this far down the picture
 
 SPLIT_SEED = 2026
 N_TEST, N_VAL, N_TRAIN = 100, 40, 400
@@ -62,7 +75,7 @@ def make_splits(rows):
 
 def build_one(job):
     """Download one recording, extract features, delete the video. Returns (name, status)."""
-    row, out, local_video = job
+    row, out, local_video, shift = job
     name = f"{row['patient_id']}_{row['step']}"
     folder = os.path.join(out, name)
     feats_path = os.path.join(folder, "features.npz")
@@ -81,6 +94,12 @@ def build_one(job):
         if video is None:
             video = os.path.join(tmp, "vid.avi")
             download(row["video"], video)
+        if shift:                                    # --transform low: face at the bottom edge
+            moved = os.path.join(tmp, "low.avi")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", video, "-vf",
+                            f"pad=iw:ih+{shift}:0:{shift}:color=gray,crop=iw:ih-{shift}:0:0",
+                            "-c:v", "ffv1", moved], check=True)
+            video = moved
         f = extract_features(video, cache_dir=None)
         np.savez_compressed(feats_path + ".part.npz", t=f["t"], background=f["background"], face=f["face"],
                             moving=f["moving"], pose=f["pose"], **{f"p_{n}": v for n, v in f["patches"].items()})
@@ -108,7 +127,13 @@ def main():
                     help="build only these splits (default: validation, train, test, in that order)")
     ap.add_argument("--local", action="append", default=[],
                     help="folders that already hold <patient>_<step>/vid.avi (skips those downloads)")
+    ap.add_argument("--camera", choices=CAMERAS, default=CAMERA, help="front (default), left (USBVideo), right (IriunWebcam)")
+    ap.add_argument("--splits", default=None, help="reuse this splits.json (same people in each split)")
+    ap.add_argument("--transform", choices=["low"], default=None, help="low: face at the bottom edge, chin cut off")
+    ap.add_argument("--front", default=None, help="frontal features folder (head pose for --transform low)")
     args = ap.parse_args()
+    if args.transform and (args.camera != CAMERA or not args.front):
+        ap.error("--transform low needs the front camera and --front")
 
     os.makedirs(args.out, exist_ok=True)
     db = os.path.join(args.out, "db.csv")
@@ -116,6 +141,8 @@ def main():
     with open(db, newline="") as f:
         rows = list(csv.DictReader(f))
     splits_path = os.path.join(args.out, "splits.json")
+    if args.splits and not os.path.exists(splits_path):
+        shutil.copy(args.splits, splits_path)
     if os.path.exists(splits_path):
         with open(splits_path) as f:
             splits = json.load(f)
@@ -125,7 +152,7 @@ def main():
             json.dump(splits, f, indent=1)
     print({k: len(v) for k, v in splits.items() if k != "seed"})
 
-    frontal = {(r["patient_id"], r["step"]): r for r in rows if r["camera"] == CAMERA}
+    frontal = {(r["patient_id"], r["step"]): r for r in rows if r["camera"] == args.camera}
     jobs = []
     for split in args.only or ["validation", "train", "test"]:
         for p in splits[split]:
@@ -133,7 +160,14 @@ def main():
                 name = f"{p}_{step}"
                 local = next((os.path.join(d, name, "vid.avi") for d in args.local
                               if os.path.exists(os.path.join(d, name, "vid.avi"))), None)
-                jobs.append((frontal[(p, step)], args.out, local))
+                if args.camera != CAMERA:
+                    local = None                             # local copies are frontal videos
+                shift = 0
+                if args.transform == "low":
+                    nose_y = np.nanmedian(load_features(os.path.join(args.front, name))["pose"][:, 1])
+                    shift = max(0, int(round((LOW_NOSE_Y - nose_y) * 480 / 2)) * 2)   # 640x480 webcam; even
+                if (p, step) in frontal:
+                    jobs.append((frontal[(p, step)], args.out, local, shift))
     print(f"{len(jobs)} recordings", flush=True)
 
     from multiprocessing import get_context
