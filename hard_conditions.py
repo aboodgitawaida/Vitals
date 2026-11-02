@@ -31,7 +31,7 @@ from live_session import FACE_GAP_SEC, start_sec
 from vitals_dsp import analyze_heart_rate
 from vitals_stream import HeartRateTracker, simulate_display
 
-STEP = 5.0
+STEP = 10.0
 
 
 def restarts(t, face, gap):
@@ -47,7 +47,7 @@ def restarts(t, face, gap):
 
 
 def run(job):
-    folder, gap = job
+    folder, gaps = job
     f = load_features(folder)
     t_gt, ppg, _ = read_ground_truth(os.path.join(folder, "ground_truth.txt"))
     t, face = f["t"], f["face"]
@@ -55,7 +55,7 @@ def run(job):
     out = {"name": os.path.basename(folder), "minutes": (t[-1] - t[0]) / 60, "face": float(face.mean()),
            "moving": float(f["moving"][face].mean()) if face.any() else 0.0,
            "framing": float(np.mean((pose[:, 2] < FACE_SIZE_MIN) | (np.abs(pose[:, 3]) > ROLL_MAX))) if face.any() else 1.0,
-           "restarts": restarts(t, face, gap), "windows": []}
+           "restarts": {g: restarts(t, face, g) for g in gaps}, "windows": [], "screens": {}}
     for end in np.arange(15.0, t[-1], STEP):
         sel = (t > end - 15) & (t <= end) & face & ~f["moving"]
         ref = reference_bpm(t_gt, ppg, end)
@@ -67,16 +67,22 @@ def run(job):
                                    patch_map=False, method=method)
             row[label] = None if r is None else r["bpm"]
         out["windows"].append(row)
-    shown = simulate_display(t, f["patches"], f["background"], face, f["moving"], HeartRateTracker(),
-                             max_gap_sec=gap, pose=f["pose"], method="net", with_settling=True,
-                             min_sec=start_sec("net"))
-    rows = []
-    for now, b, _, settling in shown:
-        ref = reference_bpm(t_gt, ppg, max(now, 10.0), window=min(15.0, max(now, 10.0)))
-        if ref is not None:
-            rows.append((float(now), b, ref, bool(settling)))
-    out["screen"] = {"network": rows}
+    for gap in gaps:
+        shown = simulate_display(t, f["patches"], f["background"], face, f["moving"], HeartRateTracker(),
+                                 max_gap_sec=gap, pose=f["pose"], method="net", with_settling=True,
+                                 min_sec=start_sec("net"))
+        rows = []
+        for now, b, _, settling in shown:
+            ref = reference_bpm(t_gt, ppg, max(now, 10.0), window=min(15.0, max(now, 10.0)))
+            if ref is not None:
+                rows.append((float(now), b, ref, bool(settling)))
+        out["screens"][gap] = rows
     return out
+
+
+def at_gap(recs, gap):
+    """The recordings as compare_net.screen_stats expects them, for one face-loss bridge."""
+    return [dict(r, screen={"network": r["screens"][gap]}, restarts=r["restarts"][gap]) for r in recs]
 
 
 def window_errors(recs, label):
@@ -115,20 +121,25 @@ def main():
     from multiprocessing import get_context
     text = [f"# Harder conditions ({args.split} split)", "",
             f"`python hard_conditions.py --split {args.split} " + " ".join(f'--cond "{c}"' for c in args.cond) + "`", ""]
-    for gap in args.gap or [FACE_GAP_SEC]:
-        results = {}
-        for spec in args.cond:
-            name, folder = spec.split("=", 1)
-            with open(os.path.join(folder, "splits.json")) as fh:
-                people = json.load(fh)[args.split]
-            if args.max_people:
-                people = people[:args.max_people]
-            folders = [os.path.join(folder, f"{p}_{s}") for p in people for s in ("before", "after")
-                       if os.path.exists(os.path.join(folder, f"{p}_{s}", "features.npz"))]
-            with get_context("spawn").Pool(args.jobs) as pool:
-                results[name] = pool.map(run, [(fo, gap) for fo in folders])
-        text += report(results, gap) + [""]
-        print("\n".join(report(results, gap)), flush=True)
+    gaps = args.gap or [FACE_GAP_SEC]
+    results = {}
+    for spec in args.cond:
+        name, folder = spec.split("=", 1)
+        with open(os.path.join(folder, "splits.json")) as fh:
+            people = json.load(fh)[args.split]
+        if args.max_people:
+            people = people[:args.max_people]
+        folders = [os.path.join(folder, f"{p}_{s}") for p in people for s in ("before", "after")
+                   if os.path.exists(os.path.join(folder, f"{p}_{s}", "features.npz"))]
+        missing = 2 * len(people) - len(folders)
+        with get_context("spawn").Pool(args.jobs) as pool:
+            results[name] = pool.map(run, [(fo, gaps) for fo in folders])
+        print(f"{name}: {len(folders)} recordings" + (f" ({missing} had no face at all, left out)" if missing else ""),
+              flush=True)
+    for gap in gaps:
+        lines = report({k: at_gap(v, gap) for k, v in results.items()}, gap)
+        text += lines + [""]
+        print("\n".join(lines), flush=True)
     text.append(f"First number: within the first {FIRST_SEC:.0f} s of each recording.")
     if args.out:
         with open(args.out, "w") as fh:
