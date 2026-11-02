@@ -137,7 +137,8 @@ class LiveSession:
                 pose=self.buffer.pose_array(), use_motion=self.use_motion)
             self.analysis = a
             self.reading = self.tracker.update(now, a and a["bpm"], a and a["snr_db"], usable=not moving,
-                                               window_sec=have, agreement=a and a["agreement"])
+                                               window_sec=have, agreement=a and a["agreement"],
+                                               confidence=a and a.get("confidence"))
             self.trend.append((now, self.reading.bpm))
             self.last_update = now
             ran = True

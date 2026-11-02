@@ -184,7 +184,8 @@ def main():
             timer.add("analysis", analysis_ms)
             reading = tracker.update(snap_time, analysis and analysis["bpm"],
                                      analysis and analysis["snr_db"], usable=not snap_moving,
-                                     window_sec=snap_span, agreement=analysis and analysis["agreement"])
+                                     window_sec=snap_span, agreement=analysis and analysis["agreement"],
+                                     confidence=analysis and analysis.get("confidence"))
             trend.append((snap_time, reading.bpm))
         status, colors, bg_rgb, moving_now, pose = "", None, None, False, None
         method = METHODS[method_idx]

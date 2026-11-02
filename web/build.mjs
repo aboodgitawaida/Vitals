@@ -3,8 +3,9 @@
 //   node web/build.mjs
 //
 // Copies the page from web/ and the Python modules the browser needs (live_session.py
-// and everything it imports from this repo) into dist/py/, with a manifest the
-// worker reads. Nothing is compiled: the .py files are served as they are.
+// and everything it imports from this repo) into dist/py/, plus the data files they
+// load (the network's weights), with a manifest the worker reads. Nothing is
+// compiled: the .py files are served as they are.
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -33,6 +34,7 @@ rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, "py"), { recursive: true });
 cpSync(join(root, "web"), out, { recursive: true, filter: (src) => !src.endsWith("build.mjs") });
 const files = localModules("live_session");
-for (const f of files) cpSync(join(root, f), join(out, "py", f));
-writeFileSync(join(out, "py", "manifest.json"), JSON.stringify(files));
-console.log(`dist/ ready (python: ${files.join(", ")})`);
+const data = ["vitals_net_weights.npz"].filter((f) => existsSync(join(root, f)));
+for (const f of [...files, ...data]) cpSync(join(root, f), join(out, "py", f));
+writeFileSync(join(out, "py", "manifest.json"), JSON.stringify({ modules: files, data }));
+console.log(`dist/ ready (python: ${files.join(", ")}; data: ${data.join(", ") || "none"})`);
