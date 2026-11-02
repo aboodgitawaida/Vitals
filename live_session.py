@@ -17,13 +17,14 @@ from collections import deque
 import numpy as np
 
 from face_layout import REGIONS, TRACES, assess_lighting, patch_region
-from vitals_dsp import GREEN_MARGIN_DB, HR_HIGH, HR_LOW, analyze_heart_rate
+from vitals_dsp import GREEN_MARGIN_DB, HR_HIGH, HR_LOW, analyze_heart_rate, use_net
 from vitals_stream import HeartRateTracker, SampleBuffer
 
 # ---------------- Settings you can tune (shared with vitals_app.py) ----------------
 WINDOW_SEC = 15          # seconds of history per estimate (15 s -> ~4 BPM frequency resolution)
 MIN_SEC = 8              # first estimate after 8 s: on real recordings shorter windows were right
                          # only ~40% of the time (see HeartRateTracker). Keep in sync with simulate_display.
+NET_MIN_SEC = 6          # with the trained network: its shortest training window; chosen on validation
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
 CONF_GOOD = 0.8          # network confidence at or above: "good signal"
@@ -32,6 +33,11 @@ TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than th
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
 METHODS = ["auto", "classic", "pos", "green"]   # auto: the trained network when shipped (vitals_dsp)
 TREND_SEC = 60           # length of the trend chart
+
+
+def start_sec(method):
+    """Seconds of data before the first estimate, for this method."""
+    return NET_MIN_SEC if method == "net" or (method == "auto" and use_net()) else MIN_SEC
 
 
 def region_summary(analysis):
@@ -124,7 +130,8 @@ class LiveSession:
 
         have = self.buffer.span()
         moving = now - self.last_motion < MOTION_HOLD
-        if have < MIN_SEC:
+        need = start_sec(self.method)
+        if have < need:
             self.lighting = assess_lighting(stats, fps)
             self.reading = self.tracker.update(now)
         elif analyze and now - self.last_update >= UPDATE_EVERY:
@@ -146,8 +153,8 @@ class LiveSession:
         while self.trend and now - self.trend[0][0] > TREND_SEC:
             self.trend.popleft()
 
-        if have < MIN_SEC:
-            self.status = f"Hold still... collecting {have:.0f}/{MIN_SEC} s"
+        if have < need:
+            self.status = f"Hold still... collecting {have:.0f}/{need} s"
         elif moving:
             self.status = "Movement detected - hold still"
         elif len(self.talking_level) > 10 and np.std(self.talking_level) > TALKING_STD:
@@ -185,7 +192,7 @@ class LiveSession:
             "lighting": list(self.lighting), "method": self.method,
             "settling": bool(r.bpm is not None and self.tracker.settling(self.last_update)),
             "use_background": self.use_background, "use_motion": self.use_motion,
-            "collected_sec": float(self.buffer.span()), "min_sec": MIN_SEC,
+            "collected_sec": float(self.buffer.span()), "min_sec": start_sec(self.method),
             "trend": [[float(t), _num(b)] for t, b in self.trend],
             "regions": {k: [_num(s), float(w)] for k, (s, w) in region_summary(a).items()},
             "snr_db": None, "method_used": None, "agreement": None, "peak_bpm": None,

@@ -26,7 +26,7 @@ from compare_net import screen_stats
 from evaluate_video import read_ground_truth, reference_bpm
 from vitals_stream import HeartRateTracker, Reading, simulate_display
 
-MIN_SEC_FLOOR = 6.0
+MIN_SEC_FLOOR = 6.0          # the network's shortest training window (vitals_net.MIN_WINDOW_SEC)
 
 
 class Recorder:
