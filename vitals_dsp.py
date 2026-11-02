@@ -250,6 +250,15 @@ MIN_LEVEL = 2.0          # a colour channel averaging below this (of 255) is too
                          # (e.g. a forehead patch covered by black hair): skipped, not divided by ~0
 GREEN_MARGIN_DB = 6.0    # auto mode: green must beat POS by this much (dB) to be used. On real
                          # recordings green was rarely better and often fooled by noise.
+USE_NET = True           # "auto" uses the trained network when its weights are shipped
+
+
+def use_net():
+    import os
+    return USE_NET and os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "vitals_net_weights.npz"))
+
+
 METHODS = {"pos": pos_pulse, "chrom": chrom_pulse, "green": lambda rgb, fs=FS: green_pulse(rgb)}
 AGREE_BPM = 5.0          # two methods "agree" when their peaks are this close
 
@@ -340,7 +349,9 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     patch_traces:   {patch name: (N, 3) mean RGB per frame, NaN rows = missing}. An entry
                     named FACE_TRACE (whole face) is used as the pulse signal when usable.
     background:     (N, 3) mean RGB of the background wall, or None
-    method:         "auto" (try both, keep cleaner), "pos" or "green"
+    method:         "net" (the trained network, vitals_net.py), "auto" (the network when its
+                    weights are present and USE_NET is on, else POS or green, whichever is
+                    cleaner), "pos" or "green"
     prev_bpm:       last confident reading, for tracking (or None)
     green_margin_db: in auto mode, green must beat POS by this many dB to be
                     chosen. The app raises it by 3 dB when the head moved during
@@ -376,6 +387,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     Returns a dict, or None if no patch had usable data.
     """
     t = np.asarray(times, dtype=float)
+    classic = "auto" if method == "net" else method        # the hand-made pipeline always runs too
 
     # Nuisance references: wall colour (3 signals) and head pose (4 signals).
     references = []
@@ -425,7 +437,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         # Per-patch SNR, for the on-screen SNR map only
         if not patch_map:
             continue
-        map_method = "green" if method == "auto" else method
+        map_method = "green" if classic == "auto" else classic
         f, p = power_spectrum(pulse_signal(rgb_u, map_method, fs), fs)
         patch_snr[name] = snr_db(f, p, pick_peak(f, p, HR_LOW, HR_HIGH), HR_LOW, HR_HIGH)
 
@@ -447,7 +459,7 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
     # The synthetic ablation showed each method failing where the other succeeds.
     prior_hz = prev_bpm / 60.0 if prev_bpm else None
     candidates = []
-    for m in (["pos", "green"] if method == "auto" else [method]):
+    for m in (["pos", "green"] if classic == "auto" else [classic]):
         fused = pulse_signal(pulse_rgb, m, fs)
         fused = fused / (fused.std() + 1e-12)
         freqs, power = power_spectrum(fused, fs)
@@ -468,8 +480,21 @@ def analyze_heart_rate(times, patch_traces, background=None, method="auto", prev
         method_bpm[m] = 60.0 * pick_peak(fq, pw, HR_LOW, HR_HIGH, harmonics=use_harmonics)
     agreement = sum(1 for b in method_bpm.values() if abs(b - f0 * 60.0) <= AGREE_BPM)
 
+    confidence = posterior = None
+    if method == "net" or (method == "auto" and use_net()):
+        import vitals_net                                  # numpy only; loaded on first use
+        if t[-1] - t[0] >= vitals_net.MIN_WINDOW_SEC - 0.5:
+            x = vitals_net.prepare(t, patch_traces, background)
+            if x is not None:
+                est = vitals_net.estimate(x)
+                f0, used, confidence, posterior = est["bpm"] / 60.0, "net", est["confidence"], est["posterior"]
+                fused = est["pulse"] / (est["pulse"].std() + 1e-12)
+                agreement = sum(1 for b in method_bpm.values() if abs(b - f0 * 60.0) <= AGREE_BPM)
+
     return {
         "bpm": f0 * 60.0,
+        "confidence": confidence,            # network only: P(within 5 BPM), else None
+        "posterior": posterior,              # network only: probability per BPM (vitals_net.BPM_BINS)
         "snr_db": snr,
         "method_used": used,
         "pulse": fused,
