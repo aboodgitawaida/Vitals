@@ -227,9 +227,9 @@ class HeartRateTracker:
     SHORT_WINDOW_EXTRA_DB = 0.0   # extra SNR needed for the shortest (5 s) windows (off: see above)
     SHORT_WINDOW_SEC = 5.0        # window length that gets the full extra
     FULL_BAR_SEC = 8.0            # from this window length on, no extra
-    CONF_ENTER = 0.5              # with the network: its confidence replaces SNR (set on validation)
+    CONF_ENTER = 0.4              # with the network: its confidence replaces SNR (tune_tracker.py, validation)
     CONF_KEEP = 0.3
-    CONF_CONFIRM = 0.7
+    CONF_CONFIRM = 0.8
     NET_AGREEMENT = False         # also require 2 of 3 hand-made methods to agree with the network?
     SETTLE_SEC = 6.0              # a new reading is "settling" for at least this long...
     SNR_CONFIRM = 0.0             # ...and until a window reaches this SNR (dB)

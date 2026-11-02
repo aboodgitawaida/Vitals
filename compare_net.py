@@ -23,6 +23,7 @@ import numpy as np
 from build_mcd_dataset import load_features
 from evaluate_video import read_ground_truth, reference_bpm
 from face_layout import FACE_TRACE
+from live_session import start_sec
 from vitals_dsp import analyze_heart_rate
 from vitals_stream import HeartRateTracker, simulate_display
 
@@ -60,7 +61,8 @@ def run_recording(job):
     for label, method in PIPELINES.items():
         kw = tracker_kw if method == "net" else {}
         shown = simulate_display(t, f["patches"], f["background"], f["face"], f["moving"],
-                                 HeartRateTracker(**kw), pose=f["pose"], method=method, with_settling=True)
+                                 HeartRateTracker(**kw), pose=f["pose"], method=method, with_settling=True,
+                                 min_sec=start_sec(method))
         rows = []
         for now, b, _, settling in shown:
             ref = reference_bpm(t_gt, ppg, max(now, 10.0), window=min(15.0, max(now, 10.0)))

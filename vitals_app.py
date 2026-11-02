@@ -43,8 +43,8 @@ from liveness import CHALLENGE_SEC, LivenessSession
 from vitals_dsp import GREEN_MARGIN_DB
 from vitals_stream import POSE_FIELDS, HeartRateTracker, SampleBuffer
 # Settings shared with the browser version (web/) live in live_session.py.
-from live_session import (FACE_GAP_SEC, METHODS, MIN_SEC, MOTION_HOLD, SNR_GOOD_DB, TALKING_STD,
-                          UPDATE_EVERY, WINDOW_SEC, region_summary)
+from live_session import (FACE_GAP_SEC, METHODS, MOTION_HOLD, SNR_GOOD_DB, TALKING_STD,
+                          UPDATE_EVERY, WINDOW_SEC, region_summary, start_sec)
 
 # ---------------- Settings you can tune (the rest are in live_session.py) ----------------
 FRAME_WIDTH = 640        # FaceMesh and the dashboard use a copy this wide (keeps them fast)
@@ -217,7 +217,7 @@ def main():
             moving = now - last_motion < MOTION_HOLD
             if liveness is not None:
                 pass
-            elif have < MIN_SEC:
+            elif have < start_sec(method):
                 lighting = assess_lighting(stats, fps)
                 reading = tracker.update(now)
             elif now - last_update >= UPDATE_EVERY and not analyzer.busy():   # one job at a time
@@ -238,8 +238,8 @@ def main():
                     patch_snr = analysis["patch_snr"] if analysis else {}
                     frame = draw_overlay(frame, regions, patches, patch_snr, bg_boxes)
 
-            if have < MIN_SEC:
-                status = f"Hold still... collecting {have:.0f}/{MIN_SEC} s"
+            if have < start_sec(method):
+                status = f"Hold still... collecting {have:.0f}/{start_sec(method)} s"
             elif moving:
                 status = "Movement detected - hold still"
             elif len(talking_level) > 10 and np.std(talking_level) > TALKING_STD:
