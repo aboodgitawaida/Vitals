@@ -54,6 +54,10 @@ def download(path, dest, tries=6):
             wait = 30 * (attempt + 1)
             print(f"   rate-limited by the Hub, waiting {wait} s (set HF_TOKEN to avoid this)", flush=True)
             time.sleep(wait)
+        except (urllib.error.URLError, ConnectionError, TimeoutError):     # dropped connection: try again
+            if attempt == tries - 1:
+                raise
+            time.sleep(5 * (attempt + 1))
 
 
 def write_ground_truth(ppg_sync_text, hr, path):

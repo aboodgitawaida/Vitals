@@ -6,6 +6,8 @@ extract the per-frame features exactly as the app measures them
 (evaluate_video.extract_features: whole face, 16 patches, wall, head pose),
 keep those (~1.3 MB) plus the ground truth, and delete the video. Several
 recordings are processed at once; an interrupted run resumes where it stopped.
+Each worker needs ~3 GB (MediaPipe); if one is killed for lack of memory, its
+recording is lost and the run never finishes: stop it and run it again.
 
 People are split once, at random with a fixed seed, and the split is saved:
     test        100 people   the 16 earlier test people (seed 1) + 84 more; used once, at the end
