@@ -194,6 +194,17 @@ export function headPose(lm, w, h) {
   return [lm[1][0] / w, lm[1][1] / h, faceW / w, roll, dist(lm[13], lm[14]) / faceW];
 }
 
+export function faceFraming(lm, w, h, oval) {
+  // How the face sits in the picture, for the framing coach (frame_features.face_framing).
+  let out = 0;
+  for (const i of oval) { const [x, y] = lm[i]; if (x < 0 || x >= w || y < 0 || y >= h) out++; }
+  return {
+    outside: out / oval.length,
+    size: dist(lm[234], lm[454]) / w,
+    roll: Math.atan2(lm[263][1] - lm[33][1], lm[263][0] - lm[33][0]),
+  };
+}
+
 export class FeatureExtractor {
   // Keeps the little bit of state needed between frames (frame_features.FeatureExtractor).
   constructor(cfg) { this.cfg = cfg; this.reset(); }
@@ -219,7 +230,7 @@ export class FeatureExtractor {
       pose: headPose(lm, frame.width, frame.height),
       movement, fast_motion: fast, small_motion: movement > cfg.SMALL_MOTION,
       overlay: { patches: patchInfo.patches, regions: patchInfo.regions, bg_boxes: bg.boxes },
-      stats: patchInfo.stats,
+      stats: { ...patchInfo.stats, framing: faceFraming(lm, frame.width, frame.height, cfg.FACE_OVAL) },
     };
   }
 }

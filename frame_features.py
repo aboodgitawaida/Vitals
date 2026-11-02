@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from face_layout import FACE_TRACE, MOTION_LIMIT, SMALL_MOTION, SMOOTHING  # noqa: F401 (re-exported)
+from face_layout import FACE_OVAL, FACE_TRACE, MOTION_LIMIT, SMALL_MOTION, SMOOTHING  # noqa: F401 (re-exported)
 from face_regions import background_color, extract_patch_colors, face_color, landmarks_to_array
 
 
@@ -33,6 +33,19 @@ def head_pose(lm, w, h):
     face_w = np.linalg.norm(lm[234] - lm[454]) + 1e-9
     mouth = np.linalg.norm(lm[13] - lm[14]) / face_w          # 13/14 = inner upper/lower lip
     return np.array([lm[1][0] / w, lm[1][1] / h, face_w / w, roll, mouth])
+
+
+def face_framing(lm, w, h):
+    """
+    How the face sits in the picture, for the framing coach (face_layout.assess_framing):
+    share of the face outline outside the frame (MediaPipe places landmarks beyond the
+    edge when part of the face is cut off), face width / frame width, and roll.
+    """
+    oval = lm[FACE_OVAL]
+    outside = np.mean((oval[:, 0] < 0) | (oval[:, 0] >= w) | (oval[:, 1] < 0) | (oval[:, 1] >= h))
+    left_eye, right_eye = lm[33], lm[263]
+    return {"outside": float(outside), "size": float(np.linalg.norm(lm[234] - lm[454]) / w),
+            "roll": float(math.atan2(right_eye[1] - left_eye[1], right_eye[0] - left_eye[0]))}
 
 
 @dataclass
@@ -78,6 +91,7 @@ class FeatureExtractor:
             self.smooth_lm = SMOOTHING * self.smooth_lm + (1 - SMOOTHING) * lm
 
         colors, patches, regions, stats = extract_patch_colors(frame_bgr, self.smooth_lm)
+        stats["framing"] = face_framing(lm, w, h)
         colors[FACE_TRACE] = face_color(frame_bgr, self.smooth_lm)
         bg_rgb, bg_boxes = background_color(frame_bgr, self.smooth_lm)
         return FrameFeatures(

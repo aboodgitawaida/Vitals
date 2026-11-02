@@ -34,7 +34,7 @@ photoplethysmography (rPPG)**.
 | **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
 | **How** | MediaPipe face tracking in JavaScript; a neural network ([`vitals_net.py`](vitals_net.py), 74k weights, trained in PyTorch, run in numpy) and the project's own Python signal processing run unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
 | **Accuracy** | Tested once against a finger pulse sensor on 200 recordings of 100 people the network never saw ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): **85% of the steady readings it shows are within 5 BPM** (average error 3.0 BPM), against 67% (6.6 BPM) for the hand-made pipeline it replaced. The first number appears after a median of **7 s** (was 10 s), within 15 s for 96% of recordings (was 66%). [Details](#validation) |
-| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 90 tests and a linter in CI. |
+| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 98 tests and a linter in CI. |
 | **Honesty** | The network's confidence is calibrated (when it says 90%+, it is right 95% of the time), so the app shows "--" instead of guessing; failure cases are published, and so is what it deliberately does not measure. |
 
 > Not a medical device. Not for health, stress or diagnostic use.
@@ -79,7 +79,7 @@ photoplethysmography (rPPG)**.
   network needs 6 s of data, so a first number appears after a median of 7 s
   of face time (15 s two versions ago), shown dimmed as "settling" until it
   has lasted 6 s and the network is 80% sure.
-* **Tested.** 90 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
+* **Tested.** 98 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
   including numpy-vs-PyTorch parity of the network on a committed fixture,
   JavaScript/Python parity of the colour measurement, and simulated
   2-minute sessions that test what the screen actually shows.
@@ -223,7 +223,16 @@ node web/build.mjs                         # assembles dist/ (page + the .py fil
 cd dist && python -m http.server 8000      # open http://localhost:8000
 ```
 
-Keys: `M` method · `B` background cancellation · `L` light mode · `R` patch SNR map · `P` performance.
+Keys: `M` method · `B` background cancellation · `L` light mode · `R` patch SNR map · `P` performance · `D` save session data.
+
+**When it gets it wrong on you:** type your real heart rate (from a watch) next to
+**Save session data** and press it. The file holds the per-frame average skin and
+wall colours, head pose and what the screen showed: no images, and nothing is
+uploaded. `python replay_session.py vitals_session_*.json.gz` then replays it through
+the exact same code, frame batch by frame batch, and shows why the app did what it
+did: when the face was lost or framed badly, every start-over and its cause, what
+the network and the hand-made pipeline each read, and the error against your
+real heart rate.
 
 Deploying: `vercel.json` sets the build command and output folder, so importing
 the repo at vercel.com/new needs no configuration.
@@ -289,6 +298,7 @@ node web/build.mjs && node tests/browser_check.mjs cam.y4m   # the web app, with
 | `liveness.py` | Liveness check prototype: pulse check + random screen-flash challenge; re-scores saved attempts |
 | `liveness_benchmark.py` | Simulated real people vs attacks (photo, mask, phone replay, virtual camera, live deepfake) |
 | `replay.py` | Re-runs every configuration on a recording against a reference BPM |
+| `replay_session.py` | Replays a session saved from the web app exactly, and explains it (resets, framing, errors) |
 | `synthetic_benchmark.py` | Per-window ablation on simulated lighting scenarios |
 | `session_benchmark.py` | End-to-end test of what the screen shows on simulated 2-minute sessions |
 | `tests/` | Unit and end-to-end tests (run in CI on every push), `browser_check.mjs` for the web app |
@@ -318,7 +328,10 @@ intro.
 * Frames are timed by when the camera captured them, not when the page got
   round to processing them.
 
-Not in the web version yet: the liveness check and recording.
+The web version also coaches framing (face partly out of the picture, too far,
+tilted), since the network was trained on people facing the camera with the
+whole face in view, and can save a session's data for replay (above). Not in the
+web version yet: the liveness check.
 
 ## Validation
 
@@ -554,7 +567,7 @@ mostly shows "--". A laptop with a GPU drops far fewer frames.
 
 ## Privacy
 
-Everything runs on your device. Recordings, liveness attempts and the
+Everything runs on your device. Saved web sessions, recordings, liveness attempts and the
 evaluation cache store per-frame average colours only, never images. If you
 record other people, tell them the video is analysed for heart rate and get
 their consent.

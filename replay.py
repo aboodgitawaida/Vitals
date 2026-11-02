@@ -36,6 +36,7 @@ import warnings
 
 import numpy as np
 
+from face_layout import FACE_TRACE
 from face_regions import patch_region
 from vitals_dsp import analyze_heart_rate
 from vitals_stream import POSE_FIELDS, HeartRateTracker, LegacyDisplay, simulate_display
@@ -100,6 +101,8 @@ def merge_regions(patches):
     """Average patches into 3 big regions (what v2 did). Missing patches are skipped per frame."""
     groups = {}
     for name, rgb in patches.items():
+        if name == FACE_TRACE:                        # the whole face is not one of the 3 regions
+            continue
         groups.setdefault(patch_region(name), []).append(rgb)
     out = {}
     for region, arrays in groups.items():
