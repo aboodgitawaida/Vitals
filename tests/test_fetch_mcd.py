@@ -75,3 +75,16 @@ def test_retime_fixes_a_wrong_header_rate(tmp_path, monkeypatch):
     times, wave, _ = read_ground_truth(folder / "ground_truth.txt")
     assert abs(reference_bpm(times, wave, 30.0) - bpm) < 2.0
     assert b.retime((row, str(folder)))[1] == "done already"
+
+
+def test_split_folders_skips_missing_and_faceless(tmp_path):
+    import json
+    from build_mcd_dataset import split_folders
+    (tmp_path / "splits.json").write_text(json.dumps({"train": ["1", "2", "3"], "validation": []}))
+    for name, face in (("1_before", 1.0), ("1_after", 0.9), ("2_before", 0.2), ("3_after", 0.6)):
+        (tmp_path / name).mkdir()
+        f = np.zeros(100, bool)
+        f[:int(face * 100)] = True
+        np.savez_compressed(tmp_path / name / "features.npz", face=f)
+    got = [p.rsplit("/", 1)[1] for p in split_folders(str(tmp_path), "train")]
+    assert got == ["1_before", "1_after", "3_after"]

@@ -15,8 +15,10 @@ recording of the split:
 """
 
 import argparse
+import csv
 import json
 import os
+import re
 
 import numpy as np
 
@@ -142,7 +144,74 @@ def report(recs):
         m = (conf >= lo) & (conf < hi)
         if m.any():
             lines.append(f"| {lo:.1f}-{min(hi, 1):.1f} | {m.sum()} | {ok[m].mean():.0%} |")
+    lines += [""] + extra_stats(recs)
     return "\n".join(lines) + "\n", st
+
+
+def _rmse_r(pairs):
+    e = pairs[:, 0] - pairs[:, 1]
+    return f"{np.sqrt((e ** 2).mean()):.2f} BPM / {np.corrcoef(pairs[:, 0], pairs[:, 1])[0, 1]:.2f}"
+
+
+def extra_stats(recs):
+    """RMSE / Pearson r, recordings under 5 BPM, at rest vs after exercise."""
+    def win(sub, label):
+        return np.array([(row[label], row["ref"]) for r in sub for row in r["windows"]["15.0"] if row[label] is not None])
+
+    def steady(label):
+        return np.array([(b, ref) for r in recs for now, b, ref, s in r["screen"][label]
+                         if now >= 8.0 and b is not None and not s])
+
+    def rec_ok(label):
+        errs = [window_errors([r], 15.0, label) for r in recs]
+        return f"{sum(len(e) > 0 and e.mean() < 5 for e in errs)} / {len(recs)}"
+
+    def step(sub, label):
+        e = window_errors(sub, 15.0, label)
+        return f"{e.mean():.2f} / {np.mean(e <= 5):.0%}" if len(e) else "--"
+
+    rest = [r for r in recs if r["name"].endswith("before")]
+    after = [r for r in recs if r["name"].endswith("after")]
+    rows = [("15 s windows: RMSE / Pearson r", lambda lb: _rmse_r(win(recs, lb))),
+            ("steady numbers: RMSE / Pearson r", lambda lb: _rmse_r(steady(lb))),
+            ("recordings with 15 s MAE under 5 BPM", rec_ok),
+            ("at rest: 15 s MAE / within 5 BPM", lambda lb: step(rest, lb)),
+            ("after exercise: 15 s MAE / within 5 BPM", lambda lb: step(after, lb))]
+    lines = ["Extra statistics (same run):", "", "| | network | hand-made |", "| --- | --- | --- |"]
+    lines += [f"| {name} | {f('network')} | {f('hand-made')} |" for name, f in rows]
+    return lines + ["", "Per recording: [`per_recording.csv`](per_recording.csv)."]
+
+
+PER_RECORDING_COLUMNS = ["recording", "face_brightness", "windows_15s", "network_MAE", "handmade_MAE",
+                         "network_within5", "handmade_within5", "network_first_number_s", "handmade_first_number_s"]
+
+
+def per_recording(recs):
+    """One row per recording: 15 s window errors and time to the first number, for both pipelines."""
+    out = []
+    for r in sorted(recs, key=lambda r: r["name"]):
+        row = {"recording": r["name"], "face_brightness": f"{r['brightness']:.1f}",
+               "windows_15s": len(r["windows"]["15.0"])}
+        for label, col in (("network", "network"), ("hand-made", "handmade")):
+            e = window_errors([r], 15.0, label)
+            row[f"{col}_MAE"] = f"{e.mean():.2f}" if len(e) else ""
+            row[f"{col}_within5"] = f"{np.mean(e <= 5):.2f}" if len(e) else ""
+            first = next((now for now, b, _, _ in r["screen"][label] if b is not None), None)
+            row[f"{col}_first_number_s"] = "" if first is None else f"{first:.1f}"
+        out.append(row)
+    return out
+
+
+def keep_header(path):
+    """The hand-written lines above the generated tables of an existing summary.md (or '')."""
+    if not os.path.exists(path):
+        return ""
+    with open(path) as f:
+        lines = f.read().splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^\d+ recordings, \d+ people\.", line):
+            return "\n".join(lines[:i]) + "\n" if i else ""
+    return ""
 
 
 def main():
@@ -151,7 +220,8 @@ def main():
     ap.add_argument("--split", default="validation", choices=["validation", "test", "train"])
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--tracker", default="{}", help="HeartRateTracker overrides for the network, as JSON")
-    ap.add_argument("--out", default=None, help="folder for summary.md and results.json")
+    ap.add_argument("--out", default=None, help="folder for summary.md, per_recording.csv and results.json "
+                    "(a hand-written header above the tables in an existing summary.md is kept)")
     args = ap.parse_args()
     with open(os.path.join(args.data, "splits.json")) as f:
         people = json.load(f)[args.split]
@@ -165,9 +235,15 @@ def main():
     print(text)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
-        with open(os.path.join(args.out, "summary.md"), "w") as f:
-            f.write(text)
-        with open(os.path.join(args.out, "results.json"), "w") as f:
+        summary = os.path.join(args.out, "summary.md")
+        header = keep_header(summary)
+        with open(summary, "w") as f:
+            f.write(header + text)
+        with open(os.path.join(args.out, "per_recording.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, PER_RECORDING_COLUMNS)
+            w.writeheader()
+            w.writerows(per_recording(recs))
+        with open(os.path.join(args.out, "results.json"), "w") as f:     # large; not committed (.gitignore)
             json.dump(recs, f)
 
 
