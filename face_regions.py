@@ -150,21 +150,27 @@ def face_color(frame, landmarks):
     return np.array([r, g, b])
 
 
-def background_color(frame, landmarks):
-    """
-    Mean RGB of the background (two boxes in the top corners of the frame,
-    skipping any that overlap the head). This is the "no pulse here"
-    reference used to cancel room-light changes. Returns (rgb or None, boxes).
-    """
-    h, w = frame.shape[:2]
+def head_box(landmarks):
+    """A face's landmarks -> a box around the whole head (hair and shoulders included)."""
     fx0, fy0 = landmarks.min(axis=0)
     fx1, fy1 = landmarks.max(axis=0)
-    pad = 0.35 * (fx1 - fx0)                                  # keep clear of hair / shoulders
-    head = (fx0 - pad, fy0 - 2 * pad, fx1 + pad, fy1 + pad)
+    pad = 0.35 * (fx1 - fx0)
+    return (fx0 - pad, fy0 - 2 * pad, fx1 + pad, fy1 + pad)
+
+
+def background_color(frame, landmarks, others=()):
+    """
+    Mean RGB of the background (two boxes in the top corners of the frame,
+    skipping any that overlap the head, or the head of anyone else in view:
+    their pulse is not "no pulse"). This is the "no pulse here" reference
+    used to cancel room-light changes. Returns (rgb or None, boxes).
+    """
+    h, w = frame.shape[:2]
+    heads = [head_box(landmarks)] + [head_box(o) for o in others]
     bw, bh = int(0.18 * w), int(0.22 * h)
     candidates = [(10, 40, 10 + bw, 40 + bh), (w - 10 - bw, 40, w - 10, 40 + bh)]
     boxes = [b for b in candidates
-             if b[2] < head[0] or b[0] > head[2] or b[3] < head[1] or b[1] > head[3]]
+             if all(b[2] < hd[0] or b[0] > hd[2] or b[3] < hd[1] or b[1] > hd[3] for hd in heads)]
     if not boxes:
         return None, []
     pixels = np.concatenate([frame[y0:y1, x0:x1].reshape(-1, 3) for x0, y0, x1, y1 in boxes])
