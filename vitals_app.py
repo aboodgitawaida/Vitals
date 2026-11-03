@@ -71,6 +71,39 @@ def open_camera(width, height):
     return cap
 
 
+class FaceCountTracker:
+    """
+    FaceMesh following as many faces as are in view (web/app.js does the same). FaceMesh looks
+    for new faces on every frame while it tracks fewer than max_num_faces: slower and jittery.
+    So a cheap face detector counts faces once a second, and a FaceMesh made for that count
+    is used: one face most of the time, up to MAX_FACES while several people are in view.
+    """
+
+    COUNT_EVERY_SEC, HOLD_SEC = 1.0, 5.0
+
+    def __init__(self):
+        self.meshes = {}
+        self.detector = mp.solutions.face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+        self.n, self.last_count, self.last_more = 1, -99.0, 0.0
+
+    def _mesh(self, n):
+        if n not in self.meshes:
+            self.meshes[n] = mp.solutions.face_mesh.FaceMesh(
+                max_num_faces=n, refine_landmarks=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        return self.meshes[n]
+
+    def process(self, rgb, now):
+        if now - self.last_count >= self.COUNT_EVERY_SEC:
+            self.last_count = now
+            found = self.detector.process(rgb).detections or []
+            want = min(max(len(found), 1), MAX_FACES)
+            if want >= self.n:
+                self.last_more = now
+            if want > self.n or (want < self.n and now - self.last_more > self.HOLD_SEC):
+                self.n = want
+        return self._mesh(self.n).process(rgb)
+
+
 def set_window_mode(light):
     """Light mode = full-screen white dashboard; normal = regular window."""
     cv2.destroyWindow(WINDOW)
@@ -128,9 +161,7 @@ def main():
     cap = open_camera(cam_w, cam_h)
     analyzer = BackgroundAnalyzer(background=not args.no_background)
     timer = StageTimer()
-    face_mesh = mp.solutions.face_mesh.FaceMesh(
-        max_num_faces=MAX_FACES, refine_landmarks=False,
-        min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    faces_tracker = FaceCountTracker()
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
 
     buffer = SampleBuffer(TRACES, WINDOW_SEC, FACE_GAP_SEC)    # rolling face and patch colours
@@ -182,7 +213,7 @@ def main():
         # FaceMesh runs on the small copy (fast). Its landmarks are fractions of the image,
         # so they map straight onto the full-resolution frame, where colours are measured.
         with timer.stage("mesh"):
-            result = face_mesh.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+            result = faces_tracker.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB), now)
         frame = full
 
         # Collect a finished background analysis, if any. It was computed from a snapshot
