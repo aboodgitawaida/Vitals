@@ -6,6 +6,11 @@ for 3 minutes at rest and again after exercise, by three cameras, with a
 finger PPG sensor recorded at the same time. This script takes the frontal
 webcam (640x480, 30 fps) and the PPG signal already synchronised to its frames.
 
+Timing: about a quarter of the videos say 24 fps in their header but were filmed
+at 30 (and some right-camera videos the other way round). The dataset's meta file
+logs the wall-clock time of every frame, so the true rate comes from there
+(true_fps) and is saved as fps.txt; evaluate_video.py uses it instead of the header.
+
 Subjects are drawn at random with a fixed seed, so the sample is not hand-picked
 and anyone can reproduce it:
 
@@ -15,6 +20,7 @@ and anyone can reproduce it:
 Output, one folder per recording (UBFC-rPPG layout):
     mcd_rppg/<patient>_<before|after>/vid.avi
     mcd_rppg/<patient>_<before|after>/ground_truth.txt   PPG per frame, HR from the dataset, time (s)
+    mcd_rppg/<patient>_<before|after>/fps.txt            true frame rate, from the frame timestamps
 
 Dataset: https://huggingface.co/datasets/kyegorov/mcd_rppg
 Paper:   https://arxiv.org/abs/2508.17924
@@ -30,7 +36,7 @@ import urllib.request
 
 BASE = "https://huggingface.co/datasets/kyegorov/mcd_rppg/resolve/main/"
 CAMERA = "FullHDwebcam"          # the frontal webcam
-FPS = 29.9                       # frame rate stored in the dataset's video files
+FPS = 29.9                       # usual frame rate of the frontal webcam (fallback only)
 
 
 def download(path, dest, tries=6):
@@ -60,10 +66,47 @@ def download(path, dest, tries=6):
             time.sleep(5 * (attempt + 1))
 
 
-def write_ground_truth(ppg_sync_text, hr, path):
+def true_fps(meta_text):
+    """Meta rows are '<frame number>  <date> <time>' -> frames per second over the whole recording."""
+    from datetime import datetime
+    stamps = []
+    for line in meta_text.splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2:
+            stamps.append(datetime.fromisoformat(parts[1].strip()).timestamp())
+    if len(stamps) < 2 or stamps[-1] <= stamps[0]:
+        raise ValueError("meta file has no usable frame timestamps")
+    return (len(stamps) - 1) / (stamps[-1] - stamps[0])
+
+
+def fetch_text(path):
+    """A small dataset file (meta, ppg_sync) as text."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = os.path.join(tmp, "file.txt")
+        download(path, dest)
+        with open(dest) as f:
+            return f.read()
+
+
+def save_fps(folder, fps):
+    with open(os.path.join(folder, "fps.txt"), "w") as f:
+        f.write(f"{fps:.4f}\n")
+
+
+def read_fps(folder):
+    """The true frame rate saved by save_fps, or None."""
+    path = os.path.join(folder, "fps.txt")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return float(f.read().strip())
+
+
+def write_ground_truth(ppg_sync_text, hr, path, fps=FPS):
     """ppg_sync rows are 'PPG value, sync offset' for each video frame -> UBFC 3-line ground truth."""
     ppg = [float(line.split()[0]) for line in ppg_sync_text.splitlines() if line.strip()]
-    times = [i / FPS for i in range(len(ppg))]
+    times = [i / fps for i in range(len(ppg))]
     with open(path, "w") as f:
         for row in (ppg, [hr] * len(ppg), times):
             f.write(" ".join(f"{x:.6g}" for x in row) + "\n")
@@ -101,8 +144,10 @@ def main():
         download(r["video"], os.path.join(folder, "vid.avi"))
         sync = os.path.join(folder, "ppg_sync.txt")
         download(r["ppg_sync"], sync)
+        fps = true_fps(fetch_text(r["meta"]))
         with open(sync) as f:
-            write_ground_truth(f.read(), float(r["pulse"] or "nan"), os.path.join(folder, "ground_truth.txt"))
+            write_ground_truth(f.read(), float(r["pulse"] or "nan"), os.path.join(folder, "ground_truth.txt"), fps)
+        save_fps(folder, fps)
 
 
 if __name__ == "__main__":
