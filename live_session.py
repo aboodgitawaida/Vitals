@@ -28,7 +28,8 @@ NET_MIN_SEC = 6          # with the trained network: its shortest training windo
 UPDATE_EVERY = 0.5       # seconds between estimates
 SNR_GOOD_DB = 3.0        # at or above: "good signal" (show/hide thresholds live in HeartRateTracker)
 CONF_GOOD = 0.8          # network confidence at or above: "good signal"
-FACE_GAP_SEC = 1.0       # face missing longer than this -> start over (shorter gaps are bridged)
+FACE_GAP_SEC = 3.0       # face missing longer than this -> start over (shorter gaps are bridged; was 1 s,
+                         # 3 s cuts start-overs on a side camera 4x at no cost: docs/validation/hard_conditions.md)
 TALKING_STD = 0.015      # lip gap (fraction of face width) varying more than this over 1 s = talking
 MOTION_HOLD = 1.5        # seconds to pause readings after big movement
 METHODS = ["auto", "classic", "pos", "green"]   # auto: the trained network when shipped (vitals_dsp)
