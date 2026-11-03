@@ -161,16 +161,27 @@ export function faceColor(frame, lm, cfg) {
   return n >= cfg.MIN_FACE_PIXELS ? [sr / n, sg / n, sb / n] : null;
 }
 
-export function backgroundColor(frame, lm, cfg) {
-  // Mean RGB of the wall in the top corners, skipping boxes that overlap the head.
-  const { data, width: w, height: h } = frame;
-  let fx0 = Infinity, fy0 = Infinity, fx1 = -Infinity, fy1 = -Infinity;
-  for (const [px, py] of lm) { fx0 = Math.min(fx0, px); fy0 = Math.min(fy0, py); fx1 = Math.max(fx1, px); fy1 = Math.max(fy1, py); }
+function bounds(lm) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [px, py] of lm) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+  return [x0, y0, x1, y1];
+}
+
+export function headBox(lm) {
+  // A box around the whole head, hair and shoulders included (face_regions.head_box).
+  const [fx0, fy0, fx1, fy1] = bounds(lm);
   const pad = 0.35 * (fx1 - fx0);
-  const head = [fx0 - pad, fy0 - 2 * pad, fx1 + pad, fy1 + pad];
+  return [fx0 - pad, fy0 - 2 * pad, fx1 + pad, fy1 + pad];
+}
+
+export function backgroundColor(frame, lm, cfg, others = []) {
+  // Mean RGB of the wall in the top corners, skipping boxes that overlap the head
+  // or anyone else's head (their pulse is not "no pulse").
+  const { data, width: w, height: h } = frame;
+  const heads = [headBox(lm), ...others.map(headBox)];
   const bw = Math.trunc(0.18 * w), bh = Math.trunc(0.22 * h);
   const candidates = [[10, 40, 10 + bw, 40 + bh], [w - 10 - bw, 40, w - 10, 40 + bh]];
-  const boxes = candidates.filter((b) => b[2] < head[0] || b[0] > head[2] || b[3] < head[1] || b[1] > head[3]);
+  const boxes = candidates.filter((b) => heads.every((hd) => b[2] < hd[0] || b[0] > hd[2] || b[3] < hd[1] || b[1] > hd[3]));
   if (!boxes.length) return { rgb: null, boxes };
   let n = 0, sr = 0, sg = 0, sb = 0;
   for (const [x0, y0, x1, y1] of boxes) {
@@ -205,13 +216,62 @@ export function faceFraming(lm, w, h, oval) {
   };
 }
 
+export class FaceLock {
+  // More than one person in view: measure one and keep following them (frame_features.FaceLock).
+  constructor(cfg) { this.cfg = cfg; this.reset(); }
+
+  reset() {
+    this.center = null; this.size = null; this.lastSeen = null; this.wanted = null;
+    this.count = 0; this.switched = false; this.measuring = false;
+  }
+
+  request(x, y) { this.wanted = [x, y]; }
+
+  pick(faces, now, w, h) {
+    // faces: [[x, y], ...] per face, in pixels; returns the index to measure, or null.
+    const cfg = this.cfg;
+    this.count = faces.length; this.switched = false;
+    const wasMeasuring = this.measuring;
+    this.measuring = false;
+    if (!faces.length) return null;
+    const boxes = faces.map(bounds);
+    const centers = boxes.map((b) => [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]);
+    const sizes = boxes.map((b) => Math.max(b[2] - b[0], 1));
+    const nearest = (p) => {
+      let best = 0;
+      for (let k = 1; k < faces.length; k++) if (dist(centers[k], p) < dist(centers[best], p)) best = k;
+      return best;
+    };
+    let i;
+    if (this.wanted !== null) {
+      const [x, y] = this.wanted;
+      this.wanted = null;
+      const inside = boxes.findIndex((b) => b[0] <= x && x <= b[2] && b[1] <= y && y <= b[3]);
+      i = inside >= 0 ? inside : nearest([x, y]);
+      // A different person, or anyone while the locked one was out of view: start over.
+      this.switched = this.center !== null && (!wasMeasuring || dist(centers[i], this.center) > cfg.FACE_LOCK_JUMP * this.size);
+    } else if (this.center !== null && now - this.lastSeen <= cfg.FACE_LOCK_SEC) {
+      i = nearest(this.center);
+      if (dist(centers[i], this.center) > cfg.FACE_LOCK_JUMP * this.size) return null;   // not in view
+    } else {
+      const halfDiag = Math.hypot(w, h) / 2;
+      const score = (k) => sizes[k] * (1 - 0.5 * dist(centers[k], [w / 2, h / 2]) / halfDiag);
+      i = 0;
+      for (let k = 1; k < faces.length; k++) if (score(k) > score(i)) i = k;
+      this.switched = this.center !== null;
+    }
+    this.center = centers[i]; this.size = sizes[i]; this.lastSeen = now; this.measuring = true;
+    return i;
+  }
+}
+
 export class FeatureExtractor {
   // Keeps the little bit of state needed between frames (frame_features.FeatureExtractor).
   constructor(cfg) { this.cfg = cfg; this.reset(); }
 
   reset() { this.smooth = null; this.prevNose = null; }
 
-  process(frame, lm) {
+  process(frame, lm, others = []) {
     if (!lm) { this.prevNose = null; return { face: false }; }
     const cfg = this.cfg;
     const faceWidth = dist(lm[234], lm[454]);
@@ -224,7 +284,7 @@ export class FeatureExtractor {
       cfg.SMOOTHING * p[1] + (1 - cfg.SMOOTHING) * lm[i][1]]);
     const patchInfo = extractPatchColors(frame, this.smooth, cfg);
     patchInfo.colors[cfg.FACE_TRACE] = faceColor(frame, this.smooth, cfg);
-    const bg = backgroundColor(frame, this.smooth, cfg);
+    const bg = backgroundColor(frame, this.smooth, cfg, others);
     return {
       face: true, colors: patchInfo.colors, bg_rgb: bg.rgb,
       pose: headPose(lm, frame.width, frame.height),

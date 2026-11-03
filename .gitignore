@@ -7,3 +7,4 @@ eval_cache/
 eval_results/
 test_videos/
 dist/
+docs/validation/**/results.json

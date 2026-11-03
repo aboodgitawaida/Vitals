@@ -20,6 +20,8 @@ People are split once, at random with a fixed seed, and the split is saved:
 Harder conditions (hard_conditions.py), same people and splits:
     python build_mcd_dataset.py --out mcd_left --camera USBVideo --splits mcd_features/splits.json --only validation
     python build_mcd_dataset.py --out mcd_low --transform low --front mcd_features --only validation
+    python build_mcd_dataset.py --out mcd_left --camera USBVideo --splits mcd_features/splits.json \
+        --only test --max-people 50           # first 50 test people (sorted), for a held-out check
 The dataset filmed everyone with three cameras at once (front, left, right), each with
 its own frame-synced PPG. "--transform low" moves the frontal video down so the face
 sits at the bottom edge with the chin out of the picture (a laptop camera looked
@@ -141,6 +143,22 @@ def retime(job):
         return name, f"FAILED: {type(e).__name__}: {e}"
 
 
+MIN_FACE_SHARE = 0.5        # recordings with a face in fewer frames are left out (some side videos)
+
+
+def split_folders(data, split, min_face=MIN_FACE_SHARE):
+    """Recording folders of one split in one features folder, with a face in at least min_face of frames."""
+    with open(os.path.join(data, "splits.json")) as f:
+        people = json.load(f)[split]
+    out = []
+    for p in people:
+        for s in ("before", "after"):
+            path = os.path.join(data, f"{p}_{s}", "features.npz")
+            if os.path.exists(path) and np.load(path)["face"].mean() >= min_face:
+                out.append(os.path.dirname(path))
+    return out
+
+
 def load_features(folder):
     """features.npz -> the same dict evaluate_video.extract_features returns."""
     d = np.load(os.path.join(folder, "features.npz"))
@@ -162,6 +180,7 @@ def main():
     ap.add_argument("--transform", choices=["low"], default=None, help="low: face at the bottom edge, chin cut off")
     ap.add_argument("--front", default=None, help="frontal features folder (head pose for --transform low)")
     ap.add_argument("--retime", action="store_true", help="fix frame times in folders already built (no face tracking)")
+    ap.add_argument("--max-people", type=int, default=0, help="only the first N people of each split (sorted)")
     args = ap.parse_args()
     if args.transform and (args.camera != CAMERA or not args.front):
         ap.error("--transform low needs the front camera and --front")
@@ -195,7 +214,7 @@ def main():
         return
     jobs = []
     for split in args.only or ["validation", "train", "test"]:
-        for p in splits[split]:
+        for p in splits[split][:args.max_people or None]:
             for step in ("before", "after"):
                 name = f"{p}_{step}"
                 local = next((os.path.join(d, name, "vid.avi") for d in args.local

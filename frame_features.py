@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from face_layout import FACE_OVAL, FACE_TRACE, MOTION_LIMIT, SMALL_MOTION, SMOOTHING  # noqa: F401 (re-exported)
+from face_layout import (FACE_LOCK_JUMP, FACE_LOCK_SEC, FACE_OVAL, FACE_TRACE, MOTION_LIMIT,  # noqa: F401
+                         SMALL_MOTION, SMOOTHING)
 from face_regions import background_color, extract_patch_colors, face_color, landmarks_to_array
 
 
@@ -48,6 +49,82 @@ def face_framing(lm, w, h):
             "roll": float(math.atan2(right_eye[1] - left_eye[1], right_eye[0] - left_eye[0]))}
 
 
+def as_pixels(face, w, h):
+    """A FaceMesh face (0..1 coordinates) or an (N, 2) pixel array -> (N, 2) pixels."""
+    return face if isinstance(face, np.ndarray) else landmarks_to_array(face, w, h)
+
+
+class FaceLock:
+    """
+    More than one person in view: measure one and keep following them.
+
+    pick() gets every face this frame and returns the index of the one to measure, or
+    None. The first time it takes the biggest, most central face. After that it takes
+    the face nearest to where that person was; if none is within FACE_LOCK_JUMP face
+    widths, that person is not in view (None) until FACE_LOCK_SEC passes and it picks
+    again. request(x, y) (a tap or click) switches to the face at that point on the
+    next frame. `switched` is True on the frame it moved to someone else; the caller
+    then starts the measurement over. Mirrored in web/features.js (FaceLock).
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.center = None          # where the measured face was (pixels)
+        self.size = None            # its width (pixels)
+        self.last_seen = None
+        self.wanted = None          # a tap waiting for the next frame
+        self.measuring = False      # did the last frame measure the locked person?
+        self.count = 0              # faces in view this frame
+        self.switched = False
+
+    def request(self, x, y):
+        self.wanted = (float(x), float(y))
+
+    @staticmethod
+    def _boxes(faces):
+        out = []
+        for f in faces:
+            x0, y0 = f.min(axis=0)
+            x1, y1 = f.max(axis=0)
+            out.append((float(x0), float(y0), float(x1), float(y1)))
+        return out
+
+    def pick(self, faces, now, w, h):
+        """faces: list of (N, 2) pixel arrays; now: seconds; (w, h): frame size."""
+        self.count, self.switched = len(faces), False
+        was_measuring, self.measuring = self.measuring, False
+        if not faces:
+            return None
+        boxes = self._boxes(faces)
+        centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes]
+        sizes = [max(b[2] - b[0], 1.0) for b in boxes]
+
+        def nearest(p):
+            return min(range(len(faces)), key=lambda i: math.hypot(centers[i][0] - p[0], centers[i][1] - p[1]))
+
+        if self.wanted is not None:
+            x, y = self.wanted
+            self.wanted = None
+            inside = [i for i, b in enumerate(boxes) if b[0] <= x <= b[2] and b[1] <= y <= b[3]]
+            i = inside[0] if inside else nearest((x, y))
+            # A different person, or anyone while the locked one was out of view: start over.
+            self.switched = self.center is not None and (not was_measuring or math.hypot(
+                centers[i][0] - self.center[0], centers[i][1] - self.center[1]) > FACE_LOCK_JUMP * self.size)
+        elif self.center is not None and now - self.last_seen <= FACE_LOCK_SEC:
+            i = nearest(self.center)
+            if math.hypot(centers[i][0] - self.center[0], centers[i][1] - self.center[1]) > FACE_LOCK_JUMP * self.size:
+                return None                         # the measured person is not in view
+        else:
+            half_diag = math.hypot(w, h) / 2
+            i = max(range(len(faces)), key=lambda k: sizes[k] * (1 - 0.5 * math.hypot(
+                centers[k][0] - w / 2, centers[k][1] - h / 2) / half_diag))
+            self.switched = self.center is not None
+        self.center, self.size, self.last_seen, self.measuring = centers[i], sizes[i], now, True
+        return i
+
+
 @dataclass
 class FrameFeatures:
     face: bool                        # did FaceMesh find a face?
@@ -70,13 +147,16 @@ class FeatureExtractor:
         self.smooth_lm = None
         self.prev_nose = None
 
-    def process(self, frame_bgr, face_landmarks):
-        """frame_bgr: full-resolution frame; face_landmarks: one FaceMesh face, or None."""
+    def process(self, frame_bgr, face_landmarks, others=()):
+        """
+        frame_bgr: full-resolution frame; face_landmarks: the face to measure (a FaceMesh
+        face or (N, 2) pixels), or None; others: anyone else in view (kept out of the wall boxes).
+        """
         if face_landmarks is None:
             self.prev_nose = None
             return FrameFeatures(face=False)
         h, w = frame_bgr.shape[:2]
-        lm = landmarks_to_array(face_landmarks, w, h)
+        lm = as_pixels(face_landmarks, w, h)
 
         # Motion check: head movement corrupts the signal far more than a pulse changes it.
         face_width = np.linalg.norm(lm[234] - lm[454])
@@ -93,7 +173,7 @@ class FeatureExtractor:
         colors, patches, regions, stats = extract_patch_colors(frame_bgr, self.smooth_lm)
         stats["framing"] = face_framing(lm, w, h)
         colors[FACE_TRACE] = face_color(frame_bgr, self.smooth_lm)
-        bg_rgb, bg_boxes = background_color(frame_bgr, self.smooth_lm)
+        bg_rgb, bg_boxes = background_color(frame_bgr, self.smooth_lm, [as_pixels(o, w, h) for o in others])
         return FrameFeatures(
             face=True, colors=colors, bg_rgb=bg_rgb,
             pose=head_pose(lm, w, h),              # raw (unsmoothed) landmarks: the real head motion

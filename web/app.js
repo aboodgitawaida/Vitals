@@ -9,9 +9,17 @@
 // The camera and colour measurement start before Python has finished loading: the
 // first seconds of samples are queued and analysed as soon as it is ready.
 
-import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
-import { FeatureExtractor } from "./features.js";
+import { FaceDetector, FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
+import { FaceLock, FeatureExtractor } from "./features.js";
 
+const MAX_FACES = 3;          // faces tracked when several people are in view (face_layout.MAX_FACES)
+// MediaPipe searches for new faces on every frame while it tracks fewer faces than it was asked
+// for: half the frame rate on a CPU, and jittery landmarks (a noisier pulse). So it is asked for
+// exactly as many faces as are in view: a cheap detector counts them once a second, and the
+// tracker follows that many (one most of the time). FaceLock then picks who is measured.
+const FACE_COUNT_EVERY_SEC = 1.0;
+const MULTI_HOLD_SEC = 5.0;   // one face this long while tracking several -> back to one
+const DETECTOR_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 const VIEW_WIDTH = 960;          // the on-screen copy (measurements use the full camera frame)
@@ -26,7 +34,7 @@ const LOG_MAX_SEC = 300;         // "Save session data" keeps the first 5 minute
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  worker: null, landmarker: null, extractor: null, cfg: null, stream: null, video: null,
+  worker: null, landmarker: null, extractor: null, lock: null, cfg: null, stream: null, video: null,
   grab: null, grabCtx: null, view: $("view"), viewCtx: null,
   pending: [], busy: false, info: null, running: false,
   t0: 0, lastFrame: null, fps: 0, method: "auto", background: true, light: false, showMap: true,
@@ -57,7 +65,7 @@ function startWorker() {
 }
 
 let fileset = null, model = null;
-async function createLandmarker(delegate) {
+async function createLandmarker(delegate, numFaces = 1) {
   // The model downloads at the same time as MediaPipe's engine, not after it.
   model ??= fetch(MODEL_URL).then((r) => {
     if (!r.ok) throw new Error("could not load the face model");
@@ -67,7 +75,7 @@ async function createLandmarker(delegate) {
   fileset ??= await FilesetResolver.forVisionTasks(WASM_URL);
   return FaceLandmarker.createFromOptions(fileset, {
     baseOptions: { modelAssetBuffer: await model, delegate },
-    runningMode: "VIDEO", numFaces: 1,
+    runningMode: "VIDEO", numFaces,
     minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
   });
 }
@@ -85,6 +93,33 @@ function softwareGraphics() {
   }
 }
 
+async function createDetector() {
+  fileset ??= await FilesetResolver.forVisionTasks(WASM_URL);
+  return FaceDetector.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: DETECTOR_URL, delegate: "CPU" }, runningMode: "VIDEO", minDetectionConfidence: 0.5,
+  });
+}
+
+function updateFaceMode(grab, now) {
+  // Ask the tracker for as many faces as are in view (see MAX_FACES): more at once, fewer only
+  // after MULTI_HOLD_SEC, so someone looking away for a moment does not make it switch back and forth.
+  if (state.modeSwitching || state.switching || !state.detector || now - state.lastFaceCount < FACE_COUNT_EVERY_SEC) return;
+  state.lastFaceCount = now;
+  let n = 0;
+  try { n = state.detector.detectForVideo(grab, performance.now()).detections.length; } catch (err) { console.warn(err); return; }
+  const want = Math.min(Math.max(n, 1), MAX_FACES);
+  if (want >= state.numFaces) state.lastMulti = now;
+  if (want > state.numFaces || (want < state.numFaces && now - state.lastMulti > MULTI_HOLD_SEC)) setFaceMode(want);
+}
+
+function setFaceMode(numFaces) {
+  state.modeSwitching = true;
+  state.landmarker.setOptions({ numFaces })
+    .then(() => { state.numFaces = numFaces; state.multi = numFaces > 1; },
+      (err) => console.warn("could not change the number of faces", err))
+    .finally(() => { state.modeSwitching = false; });
+}
+
 async function startLandmarker() {
   if (softwareGraphics()) return { landmarker: await createLandmarker("CPU"), delegate: "CPU" };
   try {
@@ -100,7 +135,7 @@ function maybeSwitchToCpu() {
   if (state.delegate !== "GPU" || state.switching || state.meshFrames < 30 || state.perf.mesh < SLOW_MESH_MS) return;
   state.switching = true;
   console.warn(`face tracking takes ${state.perf.mesh.toFixed(0)} ms on GPU: switching to CPU`);
-  createLandmarker("CPU").then((lm) => {
+  createLandmarker("CPU", state.numFaces || 1).then((lm) => {
     if (!state.running) { lm.close(); return; }
     const old = state.landmarker;
     Object.assign(state, { landmarker: lm, delegate: "CPU", switching: false, ownLandmarker: true });
@@ -241,6 +276,10 @@ async function start() {
     setLoad(`Could not load the heart-rate analysis: ${err?.message || err}`);
   });
   state.extractor = new FeatureExtractor(state.cfg);
+  state.lock = new FaceLock(state.cfg);
+  Object.assign(state, { numFaces: 1, multi: false, modeSwitching: false, lastFaceCount: -Infinity, lastMulti: 0, detector: null });
+  createDetector().then((d) => { if (state.running) state.detector = d; else d.close(); },
+    (err) => console.warn("face counting unavailable: one face is tracked", err));
   const w = state.video.videoWidth, h = state.video.videoHeight;
   state.grab = document.createElement("canvas");
   state.grab.width = w; state.grab.height = h;
@@ -267,12 +306,13 @@ function stop() {
     // The preloaded face tracker and worker are released through the preload (even if still
     // loading); a CPU tracker created by maybeSwitchToCpu is ours to close.
     if (state.ownLandmarker) { try { state.landmarker.close(); } catch {} }
+    try { state.detector?.close(); } catch {}
     discardPreload();
   }
   Object.assign(state, {
-    stream: null, worker: null, landmarker: null, cfg: null, pending: [], busy: false, info: null,
+    stream: null, worker: null, landmarker: null, lock: null, cfg: null, pending: [], busy: false, info: null,
     lastFrame: null, lastPresented: null, fps: 0, camFps: 0, perf: {}, meshFrames: 0, switching: false,
-    ownLandmarker: false,
+    ownLandmarker: false, detector: null, numFaces: 1, multi: false, modeSwitching: false,
   });
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   setLight(false, false);
@@ -327,18 +367,28 @@ function onFrame(_ts, video) {
   g.setTransform(1, 0, 0, 1, 0, 0);
   lap("grab");
 
+  updateFaceMode(grab, now);
+  if (state.modeSwitching) { scheduleFrame(); return; }   // a few frames while the tracker changes mode
   const result = state.landmarker.detectForVideo(grab, performance.now());
-  const face = result.faceLandmarks?.[0];
-  const lm = face ? face.map((p) => [Math.fround(p.x * W), Math.fround(p.y * H)]) : null;
+  const faces = (result.faceLandmarks || []).map((f) => f.map((p) => [Math.fround(p.x * W), Math.fround(p.y * H)]));
+  // Two or more people in view: measure one and keep following them (tap a face to switch).
+  const pick = state.lock.pick(faces, now, W, H);
+  if (state.lock.switched) {
+    control("reset", undefined, "switched to another person");
+    state.extractor.reset();
+    state.pending = [];
+  }
+  const lm = pick === null ? null : faces[pick];
+  const others = faces.filter((_, i) => i !== pick);
   lap("mesh");
   state.meshFrames++;
   const frame = lm ? g.getImageData(0, 0, W, H) : { width: W, height: H };
   lap("read");
-  const ff = state.extractor.process(frame, lm);
+  const ff = state.extractor.process(frame, lm, others);
   lap("patches");
 
   const sample = {
-    t: now, face: ff.face, colors: ff.colors, bg: ff.bg_rgb, pose: ff.pose,
+    t: now, face: ff.face, faces: faces.length, multi: state.multi, colors: ff.colors, bg: ff.bg_rgb, pose: ff.pose,
     fast: ff.fast_motion, small: ff.small_motion, stats: ff.stats,
     fps: state.lastPresented === null ? state.fps : state.camFps,
   };
@@ -347,7 +397,7 @@ function onFrame(_ts, video) {
   else if (state.log) state.log.truncated = true;
   flush();
   if (!state.worker) $("status").textContent = "Getting the heart-rate analysis ready… measuring already, hold still";
-  drawView(ff);
+  drawView(ff, others);
   lap("draw");
   renderPerf();
   maybeSwitchToCpu();
@@ -445,10 +495,11 @@ function snrLevel(snr) {
   return snr >= 3 ? "good" : snr >= 0 ? "fair" : "none";
 }
 
-function drawView(ff) {
+function drawView(ff, others = []) {
   const ctx = state.viewCtx, v = state.view;
   const k = v.width / state.grab.width;
   ctx.drawImage(state.grab, 0, 0, v.width, v.height);
+  if (state.lock.count > 1) drawWhoIsMeasured(ctx, k, ff, others);
   if (state.info?.framing) {
     // Where the face should be: centred, about a third of the picture's height across.
     ctx.save();
@@ -501,6 +552,46 @@ function drawView(ff) {
     ctx.strokeRect(x0 * k + 0.5, y0 * k + 0.5, (x1 - x0) * k, (y1 - y0) * k);
     ctx.fillText("bg ref", x0 * k + 5, y0 * k + 15);
   }
+}
+
+function drawWhoIsMeasured(ctx, k, ff, others) {
+  // More than one person in view: outline the measured face, dim the others, say how to switch.
+  ctx.save();
+  for (const lm of others) {
+    ctx.strokeStyle = "rgba(255,255,255,0.45)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    state.cfg.FACE_OVAL.forEach((i, n) => (n ? ctx.lineTo : ctx.moveTo).call(ctx, lm[i][0] * k, lm[i][1] * k));
+    ctx.closePath();
+    ctx.stroke();
+  }
+  const lm = ff.face ? state.extractor.smooth : null;
+  if (lm) {
+    ctx.strokeStyle = "rgba(80,220,120,0.95)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    state.cfg.FACE_OVAL.forEach((i, n) => (n ? ctx.lineTo : ctx.moveTo).call(ctx, lm[i][0] * k, lm[i][1] * k));
+    ctx.closePath();
+    ctx.stroke();
+  }
+  const text = lm ? `${state.lock.count} people in view: measuring the green one. Tap a face to switch.`
+    : `${state.lock.count} people in view: waiting for the person being measured. Tap a face to switch.`;
+  ctx.font = "600 14px system-ui, sans-serif";
+  const pad = 8, tw = ctx.measureText(text).width;
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(8, 8, Math.min(tw + 2 * pad, ctx.canvas.width - 16), 28);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(text, 8 + pad, 27, ctx.canvas.width - 16 - 2 * pad);
+  ctx.restore();
+}
+
+function chooseFace(e) {
+  // Tap or click on the camera view: measure the face there instead (from the next frame).
+  if (!state.running || !state.lock || !state.grab) return;
+  const r = state.view.getBoundingClientRect();
+  state.lock.request((e.clientX - r.left) * state.grab.width / r.width, (e.clientY - r.top) * state.grab.height / r.height);
 }
 
 function renderDashboard(info) {
@@ -724,6 +815,7 @@ $("bg-toggle").addEventListener("click", () => setBackground(!state.background))
 $("light-toggle").addEventListener("click", () => setLight(!state.light));
 $("map-toggle").addEventListener("click", () => setMap(!state.showMap));
 $("save").addEventListener("click", saveSession);
+$("view").addEventListener("click", chooseFace);
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && state.light) setLight(false, false); });
 document.addEventListener("keydown", (e) => {
   if (!state.running || e.metaKey || e.ctrlKey || e.altKey) return;

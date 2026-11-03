@@ -42,8 +42,9 @@ def run_js(frames):
         {"rgba": base64.b64encode(
             np.dstack([f[:, :, ::-1], np.full(f.shape[:2], 255, np.uint8)]).tobytes()).decode(),
          "width": f.shape[1], "height": f.shape[0],
-         "landmarks": None if lm is None else (lm * [f.shape[1], f.shape[0]]).tolist()}
-        for f, lm in frames]}
+         "landmarks": None if lm is None else (lm * [f.shape[1], f.shape[0]]).tolist(),
+         "others": [(o * [f.shape[1], f.shape[0]]).tolist() for o in others]}
+        for f, lm, *rest in frames for others in [rest[0] if rest else []]]}
     out = subprocess.run(["node", os.path.join(ROOT, "tests", "run_web_features.mjs")],
                          input=json.dumps(payload), capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
@@ -51,10 +52,11 @@ def run_js(frames):
 
 def run_py(frames):
     fx, out = FeatureExtractor(), []
-    for f, lm in frames:
+    for f, lm, *rest in frames:
         face = None if lm is None else SimpleNamespace(
             landmark=[SimpleNamespace(x=x, y=y) for x, y in lm])
-        out.append(fx.process(f, face))
+        others = [(o * [f.shape[1], f.shape[0]]).astype(np.float32) for o in (rest[0] if rest else [])]
+        out.append(fx.process(f, face, others))
     return out
 
 
@@ -72,8 +74,13 @@ def test_js_features_match_python():
         moved = lm + (0.08 if k == 5 else 0.0) + jitter      # last frame: big move (fast motion)
         frames.append((f, moved))
     frames.append((make_frame(rng), make_landmarks(rng, 640, 360, shift=(-0.38, -0.3))))  # off the edge
+    small = 0.5 + 0.35 * (make_landmarks(rng, 640, 360) - 0.5)                            # small centred face
+    dad = 0.5 + 0.35 * (make_landmarks(rng, 640, 360) - 0.5) - [0.38, 0.3]                # someone top left
+    frames.append((make_frame(rng), small))
+    frames.append((make_frame(rng), small, [dad]))
 
     js, py = run_js(frames), run_py(frames)
+    assert len(py[-2].overlay["bg_boxes"]) == 2 and len(py[-1].overlay["bg_boxes"]) == 1   # the other person is skipped
     compared = 0
     for j, p in zip(js, py):
         assert j["face"] == p.face
