@@ -39,6 +39,9 @@ def sequence():
     frames.append({"faces": [face(410, 240, 150, 1), face(770, 240, 190, 2)], "t": 3.0, "tap": (400, 250)})
     for k in range(91, 100):
         frames.append({"faces": [face(770, 240, 190, 2), face(410, 240, 150, 1)], "t": k / 30})
+    for k in range(100, 110):                              # the measured (left) person leaves...
+        frames.append({"faces": [face(770, 240, 190, 2)], "t": k / 30})
+    frames.append({"faces": [face(770, 240, 190, 2)], "t": 110 / 30, "tap": (770, 240)})   # ...the other is tapped
     return frames
 
 
@@ -65,7 +68,9 @@ def test_follows_one_person_and_switches_on_tap():
     assert all(x > 600 for x in xs[60:90])                  # back: the same person
     assert not any(o["switched"] for o in out[:90])
     assert out[90]["switched"] and xs[90] < 600             # tap on the left face
-    assert all(x < 600 for x in xs[91:]) and not any(o["switched"] for o in out[91:])
+    assert all(x < 600 for x in xs[91:100]) and not any(o["switched"] for o in out[91:100])
+    assert all(x is None for x in xs[100:110])              # the measured person left: nothing measured
+    assert out[110]["switched"] and xs[110] > 600           # tapping the one still there starts over
     assert out[0]["count"] == 2 and out[45]["count"] == 1
 
 
@@ -75,6 +80,17 @@ def test_picks_again_after_the_person_is_gone_long_enough():
     assert lock.pick([face(300, 240, 150)], 1.0, W, H) is None
     assert lock.pick([face(300, 240, 150)], 1.0 + face_layout.FACE_LOCK_SEC + 0.1, W, H) == 0
     assert lock.switched
+
+
+def test_tap_while_the_measured_person_is_away_starts_over():
+    """You step out; your dad, sitting about where you were, is tapped: his data must not join yours."""
+    lock = FaceLock()
+    assert lock.pick([face(640, 240, 160), face(1000, 240, 160)], 0.0, W, H) == 0
+    assert lock.pick([face(1000, 240, 160)], 0.5, W, H) is None          # you left
+    lock.request(1000, 240)
+    assert lock.pick([face(1000, 240, 160)], 1.0, W, H) == 0 and lock.switched
+    lock.request(1000, 240)                                                # tapping the measured face again
+    assert lock.pick([face(1000, 240, 160)], 1.1, W, H) == 0 and not lock.switched
 
 
 def test_lock_time_matches_the_session_start_over():

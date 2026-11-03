@@ -222,7 +222,7 @@ export class FaceLock {
 
   reset() {
     this.center = null; this.size = null; this.lastSeen = null; this.wanted = null;
-    this.count = 0; this.switched = false;
+    this.count = 0; this.switched = false; this.measuring = false;
   }
 
   request(x, y) { this.wanted = [x, y]; }
@@ -231,6 +231,8 @@ export class FaceLock {
     // faces: [[x, y], ...] per face, in pixels; returns the index to measure, or null.
     const cfg = this.cfg;
     this.count = faces.length; this.switched = false;
+    const wasMeasuring = this.measuring;
+    this.measuring = false;
     if (!faces.length) return null;
     const boxes = faces.map(bounds);
     const centers = boxes.map((b) => [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]);
@@ -246,7 +248,8 @@ export class FaceLock {
       this.wanted = null;
       const inside = boxes.findIndex((b) => b[0] <= x && x <= b[2] && b[1] <= y && y <= b[3]);
       i = inside >= 0 ? inside : nearest([x, y]);
-      this.switched = this.center !== null && dist(centers[i], this.center) > cfg.FACE_LOCK_JUMP * this.size;
+      // A different person, or anyone while the locked one was out of view: start over.
+      this.switched = this.center !== null && (!wasMeasuring || dist(centers[i], this.center) > cfg.FACE_LOCK_JUMP * this.size);
     } else if (this.center !== null && now - this.lastSeen <= cfg.FACE_LOCK_SEC) {
       i = nearest(this.center);
       if (dist(centers[i], this.center) > cfg.FACE_LOCK_JUMP * this.size) return null;   // not in view
@@ -257,7 +260,7 @@ export class FaceLock {
       for (let k = 1; k < faces.length; k++) if (score(k) > score(i)) i = k;
       this.switched = this.center !== null;
     }
-    this.center = centers[i]; this.size = sizes[i]; this.lastSeen = now;
+    this.center = centers[i]; this.size = sizes[i]; this.lastSeen = now; this.measuring = true;
     return i;
   }
 }
