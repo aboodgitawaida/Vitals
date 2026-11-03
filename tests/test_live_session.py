@@ -50,7 +50,7 @@ def test_long_face_loss_starts_over():
     session = LiveSession()
     play(session, s)
     t = s["t"][-1]
-    for k in range(1, 45):                    # 1.5 s without a face
+    for k in range(1, 105):                   # 3.5 s without a face
         session.frame(t + k / 30, False)
     info = session.info()
     assert info["status"] == "No face detected"
@@ -113,7 +113,19 @@ def test_start_over_records_why():
     session = LiveSession()
     play(session, s)
     t = s["t"][-1]
-    for k in range(1, 45):                                        # 1.5 s without a face
+    for k in range(1, 105):                                       # 3.5 s without a face
         session.frame(t + k / 30, False)
     when, why = session.info()["last_reset"]
-    assert why.startswith("face lost for 1.0") and when > t
+    assert why.startswith("face lost for 3.0") and when > t
+
+
+def test_two_second_face_loss_keeps_the_data():
+    s = make_session("lighter", 0.4, np.random.default_rng(9), seconds=10, events=False)
+    session = LiveSession()
+    play(session, s)
+    t, before = s["t"][-1], session.buffer.span()
+    for k in range(1, 61):                                        # 2 s without a face: ridden out
+        session.frame(t + k / 30, False)
+    assert session.info()["last_reset"] is None or session.info()["last_reset"][0] <= t
+    assert session.status == "Face lost - hold still"
+    assert session.buffer.span() >= before
