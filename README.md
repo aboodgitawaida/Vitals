@@ -14,7 +14,7 @@
 <a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard reading 67-72 BPM from a held-out recording: no reading, then a dimmed settling number, then a steady one with the network's probability curve" width="820"></a>
 
 <sub>The web app reading a recording of a person the network never trained on (MCD-rPPG test split,
-typical accuracy for that split) through a virtual camera: 67-72 BPM; the finger pulse sensor read 70-74.
+typical accuracy for that split) through a virtual camera: 67-72 BPM; the finger pulse sensor read 64-68.
 A new number is dimmed ("settling") until it is steady; the chart is the network's probability for every heart rate.
 Dashed line: the skin it measures. Face blurred for privacy.</sub>
 
@@ -34,67 +34,55 @@ photoplethysmography (rPPG)**.
 | **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
 | **How** | MediaPipe face tracking in JavaScript; a neural network ([`vitals_net.py`](vitals_net.py), 74k weights, trained in PyTorch, run in numpy) and the project's own Python signal processing run unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
 | **Accuracy** | Tested against a finger pulse sensor on 200 recordings of 100 people the network never saw ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): **90% of 15 s readings within 5 BPM** (average error 2.3 BPM), against 77% (7.1 BPM) for the hand-made pipeline it replaced. A steady number is on screen 90% of the time, and 92% of those are within 5 BPM. The first number appears after a median of **7 s** (was 10 s). [Details](#validation) |
-| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 101 tests and a linter in CI. |
+| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 109 tests and a linter in CI. |
 | **Honesty** | The network's confidence is calibrated (when it says 90%+, it is right 98% of the time), so the app shows "--" instead of guessing; failure cases are published, and so is what it deliberately does not measure. |
 
 > Not a medical device. Not for health, stress or diagnostic use.
 
 ## Highlights
 
-* **A neural network that knows when it is right.** The hand-made pipeline's
-  errors were confident errors: no check on its own signal told right from
-  wrong. So a small network was trained on 400 people from MCD-rPPG to read
-  the same skin colours and output a probability for every heart rate.
-  On 100 held-out people it cuts the error by two thirds (15 s windows: 2.3
-  vs 7.1 BPM, 95% intervals not overlapping), and its confidence predicts correctness,
-  which lets the app show a number sooner and stay quiet when unsure. It
-  runs in the browser in numpy (280 KB of weights; a whole update, network
-  included, takes ~200 ms on a CPU-only machine, within the 500 ms interval).
-  See [The model](#the-model).
-* **A data bug that hid a quarter of the accuracy.** Testing on the dataset's
-  side cameras gave numbers too bad to believe, so the timing was checked
-  against the dataset's per-frame timestamps: 29% of its videos say 24 fps in
+* **A neural network that knows when it is right.** A small network (74k
+  weights), trained on 400 people filmed next to a finger pulse sensor,
+  turns skin colour into a probability for every heart rate. On 100 held-out
+  people it is within 5 BPM in 90% of 15 s windows, against 77% for the
+  hand-made pipeline it replaced, and when it says it is 90%+ sure it is
+  right 98% of the time. So the app shows a number after 7 s and shows "--"
+  rather than guess. It runs in the browser in numpy: one update, network
+  included, takes ~150 ms. See [The model](#the-model).
+* **A data bug that hid a quarter of the accuracy.** Numbers on the
+  dataset's side cameras looked too bad to believe, so the timing was
+  checked against the per-frame timestamps: 29% of the videos say 24 fps in
   their header but were filmed at 30. Every tool had trusted the header, so
   for those people the pulse looked 20% slower than the sensor said, in
-  training labels and test references alike. With true frame times and the
-  same training recipe, held-out accuracy went from 72% to 90% of windows
-  within 5 BPM. `build_mcd_dataset.py --retime` fixes existing data in place.
-* **A bug found by running it, measured and mostly fixed.** The browser check
-  on a held-out video read 87 BPM as ~110. Cause: room light on 50 Hz mains is
-  a 10 Hz tone ~2500x stronger than the pulse, and dropped frames mix it into
-  the heart-rate band. The fix (`vitals_dsp.deflicker`) brings the network
-  from 75% to 88% of windows within 5 BPM when 30% of frames are dropped
-  (91% with no drops), and changes nothing when no frames are dropped.
-* **One Python codebase, two runtimes.** The analysis (`live_session.py`,
-  `vitals_dsp.py`, `vitals_stream.py`) runs natively on desktop and in a Web
-  Worker in the browser. A build step finds every module it imports and ships
-  only those. scipy is replaced in the browser by `signal_lite.py` (numpy-only
-  Butterworth, filtfilt and detrend, verified against scipy in tests), which
-  halves the download.
-* **Design driven by real data.** The first evaluation on real recordings was
-  far worse than simulation suggested. Diagnosing it led to measuring the
-  whole face instead of 16 small patches, dropping a motion correction that
-  removed pulse, and preferring POS: about 30% lower error on the
-  development set, 20% on the held-out test set. See
-  [What real data changed](#what-real-data-changed).
-* **Honest by design.** A tracker (acquiring / locked / holding / lost) shows
-  "--" instead of guessing when the network is unsure; its thresholds were
-  chosen on validation people only. No brightness cut-off is used even though
-  dim recordings used to be less accurate, because face brightness also depends on
-  skin tone.
-* **Fast first reading.** The camera and face tracking start before Python has
-  loaded, and measured frames are queued and analysed when it is ready. The
-  network needs 6 s of data, so a first number appears after a median of 7 s
-  of face time (15 s two versions ago), shown dimmed as "settling" until it
-  has lasted 6 s and the network is 80% sure.
-* **Tested.** 101 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
-  including numpy-vs-PyTorch parity of the network on a committed fixture,
-  JavaScript/Python parity of the colour measurement, and simulated
-  2-minute sessions that test what the screen actually shows.
-  `tests/browser_check.mjs` runs the real web app in headless Chromium on a
-  dataset video.
-* **Private.** Video never leaves the device. Recordings store per-frame
-  average colours only, never images.
+  training labels and test references alike. Fixing it took held-out
+  accuracy from 72% to 90%.
+* **Built for real rooms, not just the dataset.**
+  * Mains-powered lights flicker, and dropped frames turn that flicker into
+    a fake pulse (87 BPM read as ~110). `vitals_dsp.deflicker` removes it:
+    with 30% of frames dropped, 88% of windows are within 5 BPM instead of 75%.
+  * **Two people in view** no longer mixes their pulses. The app follows
+    one face (the green outline), keeps the wall reference off the other,
+    and a tap switches person.
+  * A framing coach says when the face is cut off, too small or tilted;
+    short face losses (up to 3 s) are bridged instead of starting over.
+  * "Save session data" stores what the page measured (colours only, no
+    images). `replay_session.py` replays it frame for frame and reproduces
+    the browser's screen exactly, so a bad session can be debugged without
+    the person.
+* **One Python codebase, two runtimes.** The analysis runs natively on
+  desktop and in a Web Worker in the browser through Pyodide. A build step
+  ships only the modules it imports, and scipy is replaced by a numpy-only
+  `signal_lite.py` (checked against scipy in tests), which halves the download.
+* **Honest by design.** Person-level train / validation / test splits;
+  every threshold chosen on validation people only; 95% intervals that
+  resample people; failure cases and weak spots (side views, dim rooms,
+  skin tone) are published, and so is what it deliberately does not measure.
+* **Tested.** 109 tests and a linter run in GitHub Actions on every push,
+  including numpy-vs-PyTorch parity of the network, JavaScript/Python
+  parity of the pixel measurement and the face lock, and simulated 2-minute
+  sessions that test what the screen shows. `tests/browser_check.mjs` runs
+  the real web app in headless Chromium on a dataset video.
+* **Private.** Video never leaves the device.
 
 ## Architecture
 
@@ -338,6 +326,14 @@ intro.
   heartbeat does. Light mode unlocks, lets the camera adapt, and locks again.
 * Frames are timed by when the camera captured them, not when the page got
   round to processing them.
+* Up to three faces are tracked. With more than one person in view,
+  `FaceLock` (`web/features.js`, mirrored in `frame_features.py` and checked
+  against it by a test) measures one: the biggest, most central face at
+  first, then whichever face is nearest to where that person was. If none is
+  within 0.75 face widths, that person is out of view and nothing is
+  measured until 3 s pass (the same rule as the start-over), so the reading
+  never silently moves to someone else. Tapping a face switches to them and
+  starts over. The wall reference boxes keep off every face.
 
 The web version also coaches framing (face partly out of the picture, too far,
 tilted), since the network was trained on people facing the camera with the
