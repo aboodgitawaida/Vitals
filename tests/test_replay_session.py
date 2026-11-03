@@ -18,13 +18,13 @@ def browser_session(seconds=20, seed=0):
     """
     A session file as web/app.js writes it, with the screen produced the way web/worker.js does:
     frames in uneven batches (analysis on the last frame of each), a method switch, and a
-    1.5 s face loss that makes the session start over.
+    3.5 s face loss that makes the session start over.
     """
     rng = np.random.default_rng(seed)
     s = make_session("lighter", 0.4, rng, seconds=seconds, events=False)
     frames = []
     for i, now in enumerate(s["t"]):
-        lost = 12.0 < now < 13.5
+        lost = 12.0 < now < 15.5
         frames.append({"t": float(now), "face": not lost,
                        "colors": None if lost else {n: s["patches"][n][i].tolist() for n in PATCHES},
                        "bg": None if lost else s["background"][i].tolist(),
@@ -59,7 +59,7 @@ def test_saved_session_round_trip_reproduces_the_screen(tmp_path):
     match, n = replay_session.screen_match(screens, loaded["screen"])
     assert n == len(doc["batches"]) and match == 1.0
     assert len(records) == len(doc["frames"])
-    assert [why for _, why in resets] == ["face lost for 1.0 s"]
+    assert [why for _, why in resets] == ["face lost for 3.0 s"]
     text = "\n".join(replay_session.report(loaded, records, screens, resets, loaded["reference_bpm"]))
     assert "Started over 1 time(s):" in text and "face lost" in text
 
