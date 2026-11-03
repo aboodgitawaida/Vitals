@@ -34,7 +34,7 @@ photoplethysmography (rPPG)**.
 | **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
 | **How** | MediaPipe face tracking in JavaScript; a neural network ([`vitals_net.py`](vitals_net.py), 74k weights, trained in PyTorch, run in numpy) and the project's own Python signal processing run unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
 | **Accuracy** | Tested against a finger pulse sensor on 200 recordings of 100 people the network never saw ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): **90% of 15 s readings within 5 BPM** (average error 2.3 BPM), against 77% (7.1 BPM) for the hand-made pipeline it replaced. A steady number is on screen 90% of the time, and 92% of those are within 5 BPM. The first number appears after a median of **7 s** (was 10 s). [Details](#validation) |
-| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 109 tests and a linter in CI. |
+| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 110 tests and a linter in CI. |
 | **Honesty** | The network's confidence is calibrated (when it says 90%+, it is right 98% of the time), so the app shows "--" instead of guessing; failure cases are published, and so is what it deliberately does not measure. |
 
 > Not a medical device. Not for health, stress or diagnostic use.
@@ -77,7 +77,7 @@ photoplethysmography (rPPG)**.
   every threshold chosen on validation people only; 95% intervals that
   resample people; failure cases and weak spots (side views, dim rooms,
   skin tone) are published, and so is what it deliberately does not measure.
-* **Tested.** 109 tests and a linter run in GitHub Actions on every push,
+* **Tested.** 110 tests and a linter run in GitHub Actions on every push,
   including numpy-vs-PyTorch parity of the network, JavaScript/Python
   parity of the pixel measurement and the face lock, and simulated 2-minute
   sessions that test what the screen shows. `tests/browser_check.mjs` runs

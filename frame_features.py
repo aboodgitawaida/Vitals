@@ -75,6 +75,7 @@ class FaceLock:
         self.size = None            # its width (pixels)
         self.last_seen = None
         self.wanted = None          # a tap waiting for the next frame
+        self.measuring = False      # did the last frame measure the locked person?
         self.count = 0              # faces in view this frame
         self.switched = False
 
@@ -93,6 +94,7 @@ class FaceLock:
     def pick(self, faces, now, w, h):
         """faces: list of (N, 2) pixel arrays; now: seconds; (w, h): frame size."""
         self.count, self.switched = len(faces), False
+        was_measuring, self.measuring = self.measuring, False
         if not faces:
             return None
         boxes = self._boxes(faces)
@@ -107,8 +109,9 @@ class FaceLock:
             self.wanted = None
             inside = [i for i, b in enumerate(boxes) if b[0] <= x <= b[2] and b[1] <= y <= b[3]]
             i = inside[0] if inside else nearest((x, y))
-            self.switched = self.center is not None and math.hypot(
-                centers[i][0] - self.center[0], centers[i][1] - self.center[1]) > FACE_LOCK_JUMP * self.size
+            # A different person, or anyone while the locked one was out of view: start over.
+            self.switched = self.center is not None and (not was_measuring or math.hypot(
+                centers[i][0] - self.center[0], centers[i][1] - self.center[1]) > FACE_LOCK_JUMP * self.size)
         elif self.center is not None and now - self.last_seen <= FACE_LOCK_SEC:
             i = nearest(self.center)
             if math.hypot(centers[i][0] - self.center[0], centers[i][1] - self.center[1]) > FACE_LOCK_JUMP * self.size:
@@ -118,7 +121,7 @@ class FaceLock:
             i = max(range(len(faces)), key=lambda k: sizes[k] * (1 - 0.5 * math.hypot(
                 centers[k][0] - w / 2, centers[k][1] - h / 2) / half_diag))
             self.switched = self.center is not None
-        self.center, self.size, self.last_seen = centers[i], sizes[i], now
+        self.center, self.size, self.last_seen, self.measuring = centers[i], sizes[i], now, True
         return i
 
 
