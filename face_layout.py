@@ -47,6 +47,11 @@ MOTION_LIMIT = 0.025      # nose movement per frame (fraction of face width) tha
 SMALL_MOTION = 0.008      # smaller movement: no pause, but auto mode then prefers POS
 SMOOTHING = 0.5           # landmark smoothing 0..1 (higher = steadier patches, more lag)
 
+# More than one person in view (frame_features.FaceLock): measure one, follow them.
+MAX_FACES = 3              # faces tracked per frame
+FACE_LOCK_JUMP = 0.75      # the measured face moving further than this (face widths) in one frame is someone else
+FACE_LOCK_SEC = 3.0        # measured person gone this long -> pick again (= live_session.FACE_GAP_SEC)
+
 
 def patch_region(patch_name):
     """'left_cheek_p3' -> 'left cheek'"""
@@ -117,7 +122,7 @@ def layout_config():
     """The settings the browser's colour measurement needs (web/features.js), as plain data."""
     keys = ("REGIONS", "GRID", "PATCHES", "MIN_PATCH_PIXELS", "DARK_FRACTION", "CLIP_LEVEL",
             "MOTION_LIMIT", "SMALL_MOTION", "SMOOTHING", "FACE_TRACE", "FACE_OVAL", "FACE_EXCLUDE",
-            "MIN_FACE_PIXELS")
+            "MIN_FACE_PIXELS", "MAX_FACES", "FACE_LOCK_JUMP", "FACE_LOCK_SEC")
     return {k: globals()[k] for k in keys}
 
 

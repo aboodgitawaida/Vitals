@@ -28,6 +28,7 @@ Paper:   https://arxiv.org/abs/2508.17924
 
 import argparse
 import csv
+import http.client
 import os
 import random
 import time
@@ -60,7 +61,7 @@ def download(path, dest, tries=6):
             wait = 30 * (attempt + 1)
             print(f"   rate-limited by the Hub, waiting {wait} s (set HF_TOKEN to avoid this)", flush=True)
             time.sleep(wait)
-        except (urllib.error.URLError, ConnectionError, TimeoutError):     # dropped connection: try again
+        except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.IncompleteRead):   # dropped: retry
             if attempt == tries - 1:
                 raise
             time.sleep(5 * (attempt + 1))

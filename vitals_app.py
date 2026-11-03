@@ -37,9 +37,9 @@ import numpy as np
 
 from dashboard import compose, liveness_screen
 from perf import BackgroundAnalyzer, StageTimer
-from face_layout import assess_framing
-from face_regions import PATCHES, TRACES, assess_lighting, draw_overlay
-from frame_features import FeatureExtractor
+from face_layout import FACE_OVAL, MAX_FACES, assess_framing
+from face_regions import PATCHES, TRACES, assess_lighting, draw_overlay, landmarks_to_array
+from frame_features import FaceLock, FeatureExtractor
 from liveness import CHALLENGE_SEC, LivenessSession
 from vitals_dsp import GREEN_MARGIN_DB
 from vitals_stream import POSE_FIELDS, HeartRateTracker, SampleBuffer
@@ -69,6 +69,39 @@ def open_camera(width, height):
     got = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
     print(f"camera: asked for {width}x{height}, got {got[0]}x{got[1]}")
     return cap
+
+
+class FaceCountTracker:
+    """
+    FaceMesh following as many faces as are in view (web/app.js does the same). FaceMesh looks
+    for new faces on every frame while it tracks fewer than max_num_faces: slower and jittery.
+    So a cheap face detector counts faces once a second, and a FaceMesh made for that count
+    is used: one face most of the time, up to MAX_FACES while several people are in view.
+    """
+
+    COUNT_EVERY_SEC, HOLD_SEC = 1.0, 5.0
+
+    def __init__(self):
+        self.meshes = {}
+        self.detector = mp.solutions.face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+        self.n, self.last_count, self.last_more = 1, -99.0, 0.0
+
+    def _mesh(self, n):
+        if n not in self.meshes:
+            self.meshes[n] = mp.solutions.face_mesh.FaceMesh(
+                max_num_faces=n, refine_landmarks=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        return self.meshes[n]
+
+    def process(self, rgb, now):
+        if now - self.last_count >= self.COUNT_EVERY_SEC:
+            self.last_count = now
+            found = self.detector.process(rgb).detections or []
+            want = min(max(len(found), 1), MAX_FACES)
+            if want >= self.n:
+                self.last_more = now
+            if want > self.n or (want < self.n and now - self.last_more > self.HOLD_SEC):
+                self.n = want
+        return self._mesh(self.n).process(rgb)
 
 
 def set_window_mode(light):
@@ -128,9 +161,7 @@ def main():
     cap = open_camera(cam_w, cam_h)
     analyzer = BackgroundAnalyzer(background=not args.no_background)
     timer = StageTimer()
-    face_mesh = mp.solutions.face_mesh.FaceMesh(
-        max_num_faces=1, refine_landmarks=False,
-        min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    faces_tracker = FaceCountTracker()
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
 
     buffer = SampleBuffer(TRACES, WINDOW_SEC, FACE_GAP_SEC)    # rolling face and patch colours
@@ -139,6 +170,13 @@ def main():
     trend = deque()                                  # (time, bpm or None) for the 60 s trend
     analysis = None
     features = FeatureExtractor()                    # per-frame skin colours, wall, head pose, motion
+    lock = FaceLock()                                # more than one person in view: measure one (click to switch)
+    view_scale = [1.0]                               # window pixels per frame pixel, for clicks
+
+    def on_click(ev, x, y, *_):
+        if ev == cv2.EVENT_LBUTTONDOWN:
+            lock.request(x / view_scale[0], y / view_scale[0])
+    cv2.setMouseCallback(WINDOW, on_click)
     framing_recent = deque(maxlen=15)                # framing advice per recent frame (face_layout)
     talking_level = deque(maxlen=30)                 # mouth opening over the last ~1 s
     method_idx, use_background, light_mode, show_map, show_perf = 0, True, False, True, True
@@ -175,7 +213,7 @@ def main():
         # FaceMesh runs on the small copy (fast). Its landmarks are fractions of the image,
         # so they map straight onto the full-resolution frame, where colours are measured.
         with timer.stage("mesh"):
-            result = face_mesh.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+            result = faces_tracker.process(cv2.cvtColor(small, cv2.COLOR_BGR2RGB), now)
         frame = full
 
         # Collect a finished background analysis, if any. It was computed from a snapshot
@@ -192,9 +230,16 @@ def main():
         status, colors, bg_rgb, moving_now, pose = "", None, None, False, None
         method = METHODS[method_idx]
 
-        if result.multi_face_landmarks:
+        faces = [landmarks_to_array(f, w, h) for f in (result.multi_face_landmarks or [])]
+        pick = lock.pick(faces, now, w, h)
+        if lock.switched:                                  # someone else now: start over
+            reset_all()
+            features.reset()
+        others = [f for i, f in enumerate(faces) if i != pick]
+
+        if pick is not None:
             with timer.stage("patches"):
-                ff = features.process(frame, result.multi_face_landmarks[0])
+                ff = features.process(frame, faces[pick], others)
                 colors, bg_rgb, pose = ff.colors, ff.bg_rgb, ff.pose
                 patches, regions = ff.overlay["patches"], ff.overlay["regions"]
                 bg_boxes, stats = ff.overlay["bg_boxes"], ff.overlay["stats"]
@@ -268,7 +313,15 @@ def main():
                 status = "No face detected"
 
         draw_start = time.perf_counter()
+        if lock.count > 1:                                 # who is being measured
+            for f in others:
+                cv2.polylines(frame, [f[FACE_OVAL].astype(np.int32)], True, (200, 200, 200), 1, cv2.LINE_AA)
+            if pick is not None:
+                cv2.polylines(frame, [faces[pick][FACE_OVAL].astype(np.int32)], True, (120, 220, 80), 3, cv2.LINE_AA)
+            hint = f"{lock.count} people: measuring the green face (click to switch)"
+            status = f"{hint} - {status}" if status else hint
         frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)   # display size
+        view_scale[0] = scale
 
         # ---- Liveness check: feed this frame, draw the full-screen challenge, skip the dashboard
         if liveness is not None:
@@ -292,11 +345,13 @@ def main():
                 liveness_shown_until = now + 15.0
                 liveness, screen_rgb = None, (255, 255, 255)
                 set_window_mode(light_mode)
+                cv2.setMouseCallback(WINDOW, on_click)
                 reset_all()                     # the flashes corrupted the heart-rate data: start fresh
             key = cv2.waitKey(1) & 0xFF
             if key == ord("v"):                 # cancel
                 liveness, screen_rgb = None, (255, 255, 255)
                 set_window_mode(light_mode)
+                cv2.setMouseCallback(WINDOW, on_click)
                 reset_all()
             elif key == ord("q"):
                 break
@@ -367,6 +422,7 @@ def main():
         elif key == ord("l"):
             light_mode = not light_mode
             set_window_mode(light_mode)
+            cv2.setMouseCallback(WINDOW, on_click)
             # The camera re-adjusts exposure after a big lighting change; old samples would
             # contain that jump, so start fresh.
             reset_all()
@@ -380,6 +436,7 @@ def main():
             liveness = LivenessSession(now, PATCHES, rng=np.random.default_rng())
             liveness_shown_until = -1.0
             set_window_mode(True)               # full screen: the screen is the light source
+            cv2.setMouseCallback(WINDOW, on_click)
             print("liveness check started")
         elif key == ord("s"):
             if rec_writer is None:

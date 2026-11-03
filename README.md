@@ -14,7 +14,7 @@
 <a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard reading 67-72 BPM from a held-out recording: no reading, then a dimmed settling number, then a steady one with the network's probability curve" width="820"></a>
 
 <sub>The web app reading a recording of a person the network never trained on (MCD-rPPG test split,
-typical accuracy for that split) through a virtual camera: 67-72 BPM; the finger pulse sensor read 70-74.
+typical accuracy for that split) through a virtual camera: 67-72 BPM; the finger pulse sensor read 64-68.
 A new number is dimmed ("settling") until it is steady; the chart is the network's probability for every heart rate.
 Dashed line: the skin it measures. Face blurred for privacy.</sub>
 
@@ -34,67 +34,60 @@ photoplethysmography (rPPG)**.
 | **What** | Camera-based heart rate (rPPG) that runs in the browser. No server, no uploads. |
 | **How** | MediaPipe face tracking in JavaScript; a neural network ([`vitals_net.py`](vitals_net.py), 74k weights, trained in PyTorch, run in numpy) and the project's own Python signal processing run unchanged in a Web Worker through Pyodide (WebAssembly). The same Python powers a desktop app. |
 | **Accuracy** | Tested against a finger pulse sensor on 200 recordings of 100 people the network never saw ([MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)): **90% of 15 s readings within 5 BPM** (average error 2.3 BPM), against 77% (7.1 BPM) for the hand-made pipeline it replaced. A steady number is on screen 90% of the time, and 92% of those are within 5 BPM. The first number appears after a median of **7 s** (was 10 s). [Details](#validation) |
-| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 101 tests and a linter in CI. |
+| **Engineering** | Dataset pipeline over 540 people with person-level train / validation / test splits; bootstrap confidence intervals by person; one codebase, two runtimes; tests that numpy matches PyTorch and that JavaScript and Python measure the same pixels; 110 tests and a linter in CI. |
 | **Honesty** | The network's confidence is calibrated (when it says 90%+, it is right 98% of the time), so the app shows "--" instead of guessing; failure cases are published, and so is what it deliberately does not measure. |
 
 > Not a medical device. Not for health, stress or diagnostic use.
 
 ## Highlights
 
-* **A neural network that knows when it is right.** The hand-made pipeline's
-  errors were confident errors: no check on its own signal told right from
-  wrong. So a small network was trained on 400 people from MCD-rPPG to read
-  the same skin colours and output a probability for every heart rate.
-  On 100 held-out people it cuts the error by two thirds (15 s windows: 2.3
-  vs 7.1 BPM, 95% intervals not overlapping), and its confidence predicts correctness,
-  which lets the app show a number sooner and stay quiet when unsure. It
-  runs in the browser in numpy (280 KB of weights; a whole update, network
-  included, takes ~200 ms on a CPU-only machine, within the 500 ms interval).
-  See [The model](#the-model).
-* **A data bug that hid a quarter of the accuracy.** Testing on the dataset's
-  side cameras gave numbers too bad to believe, so the timing was checked
-  against the dataset's per-frame timestamps: 29% of its videos say 24 fps in
+* **A neural network that knows when it is right.** A small network (74k
+  weights), trained on 400 people filmed next to a finger pulse sensor,
+  turns skin colour into a probability for every heart rate. On 100 held-out
+  people it is within 5 BPM in 90% of 15 s windows, against 77% for the
+  hand-made pipeline it replaced, and when it says it is 90%+ sure it is
+  right 98% of the time. So the app shows a number after 7 s and shows "--"
+  rather than guess. It runs in the browser in numpy: one update, network
+  included, takes ~150 ms. See [The model](#the-model).
+* **A data bug that hid a quarter of the accuracy.** Numbers on the
+  dataset's side cameras looked too bad to believe, so the timing was
+  checked against the per-frame timestamps: 29% of the videos say 24 fps in
   their header but were filmed at 30. Every tool had trusted the header, so
   for those people the pulse looked 20% slower than the sensor said, in
-  training labels and test references alike. With true frame times and the
-  same training recipe, held-out accuracy went from 72% to 90% of windows
-  within 5 BPM. `build_mcd_dataset.py --retime` fixes existing data in place.
-* **A bug found by running it, measured and mostly fixed.** The browser check
-  on a held-out video read 87 BPM as ~110. Cause: room light on 50 Hz mains is
-  a 10 Hz tone ~2500x stronger than the pulse, and dropped frames mix it into
-  the heart-rate band. The fix (`vitals_dsp.deflicker`) brings the network
-  from 75% to 88% of windows within 5 BPM when 30% of frames are dropped
-  (91% with no drops), and changes nothing when no frames are dropped.
-* **One Python codebase, two runtimes.** The analysis (`live_session.py`,
-  `vitals_dsp.py`, `vitals_stream.py`) runs natively on desktop and in a Web
-  Worker in the browser. A build step finds every module it imports and ships
-  only those. scipy is replaced in the browser by `signal_lite.py` (numpy-only
-  Butterworth, filtfilt and detrend, verified against scipy in tests), which
-  halves the download.
-* **Design driven by real data.** The first evaluation on real recordings was
-  far worse than simulation suggested. Diagnosing it led to measuring the
-  whole face instead of 16 small patches, dropping a motion correction that
-  removed pulse, and preferring POS: about 30% lower error on the
-  development set, 20% on the held-out test set. See
-  [What real data changed](#what-real-data-changed).
-* **Honest by design.** A tracker (acquiring / locked / holding / lost) shows
-  "--" instead of guessing when the network is unsure; its thresholds were
-  chosen on validation people only. No brightness cut-off is used even though
-  dim recordings used to be less accurate, because face brightness also depends on
-  skin tone.
-* **Fast first reading.** The camera and face tracking start before Python has
-  loaded, and measured frames are queued and analysed when it is ready. The
-  network needs 6 s of data, so a first number appears after a median of 7 s
-  of face time (15 s two versions ago), shown dimmed as "settling" until it
-  has lasted 6 s and the network is 80% sure.
-* **Tested.** 101 unit and end-to-end tests and a linter (ruff) run in GitHub Actions on every push,
-  including numpy-vs-PyTorch parity of the network on a committed fixture,
-  JavaScript/Python parity of the colour measurement, and simulated
-  2-minute sessions that test what the screen actually shows.
-  `tests/browser_check.mjs` runs the real web app in headless Chromium on a
-  dataset video.
-* **Private.** Video never leaves the device. Recordings store per-frame
-  average colours only, never images.
+  training labels and test references alike. Fixing it took held-out
+  accuracy from 72% to 90%.
+* **Built for real rooms, not just the dataset.**
+  * **Turned faces.** The network learned from all three of the dataset's
+    camera angles, not just the front one: on held-out people seen from the
+    side, 68% of windows are within 5 BPM (was 59-63%), and the steady
+    numbers it shows there are right 87% of the time (was 77-79%), with
+    the front unchanged.
+  * Mains-powered lights flicker, and dropped frames turn that flicker into
+    a fake pulse (87 BPM read as ~110). `vitals_dsp.deflicker` removes it:
+    with 30% of frames dropped, 86% of windows are within 5 BPM instead of 78%.
+  * **Two people in view** no longer mixes their pulses. The app follows
+    one face (the green outline), keeps the wall reference off the other,
+    and a tap switches person.
+  * A framing coach says when the face is cut off, too small or tilted;
+    short face losses (up to 3 s) are bridged instead of starting over.
+  * "Save session data" stores what the page measured (colours only, no
+    images). `replay_session.py` replays it frame for frame and reproduces
+    the browser's screen exactly, so a bad session can be debugged without
+    the person.
+* **One Python codebase, two runtimes.** The analysis runs natively on
+  desktop and in a Web Worker in the browser through Pyodide. A build step
+  ships only the modules it imports, and scipy is replaced by a numpy-only
+  `signal_lite.py` (checked against scipy in tests), which halves the download.
+* **Honest by design.** Person-level train / validation / test splits;
+  every threshold chosen on validation people only; 95% intervals that
+  resample people; failure cases and weak spots (side views, dim rooms,
+  skin tone) are published, and so is what it deliberately does not measure.
+* **Tested.** 110 tests and a linter run in GitHub Actions on every push,
+  including numpy-vs-PyTorch parity of the network, JavaScript/Python
+  parity of the pixel measurement and the face lock, and simulated 2-minute
+  sessions that test what the screen shows. `tests/browser_check.mjs` runs
+  the real web app in headless Chromium on a dataset video.
+* **Private.** Video never leaves the device.
 
 ## Architecture
 
@@ -146,18 +139,19 @@ pattern-recognition problem, so a network learns it from examples.
 **Data.** [MCD-rPPG](https://huggingface.co/datasets/kyegorov/mcd_rppg)
 (CC BY 4.0): people filmed for 3 minutes at rest and after exercise, with a
 finger PPG sensor synchronised to every frame. `build_mcd_dataset.py`
-downloads each frontal-webcam recording, extracts the per-frame features
-exactly as the app measures them, keeps those (~1 MB) and deletes the video:
-1,080 recordings of 540 people in ~5 h on 4 CPU cores. Frame times come from
+downloads each recording, extracts the per-frame features exactly as the
+app measures them, keeps those (~1 MB) and deletes the video: the frontal
+webcam for 540 people (1,080 recordings, ~5 h on 4 CPU cores) and the left
+and right cameras for the training people and some of the others. Frame times come from
 the dataset's per-frame timestamps, not the video header (wrong for 29% of
 the videos). People are split once,
 with a fixed seed, so no person is in two sets:
 
 | Split | People | Recordings | Used for |
 | --- | --- | --- | --- |
-| train | 400 | 800 | training |
+| train | 400 | 2,387 (3 camera angles) | training |
 | validation | 40 | 80 | choosing the model, its size, the tracker thresholds and the start time |
-| test | 100 | 200 | final runs only, after everything was fixed (see [the note on the second run](docs/validation/net_test/summary.md)) |
+| test | 100 | 200 front, 198 side (50 people) | final runs only, after everything was fixed ([every run listed](docs/validation/net_test/summary.md)) |
 
 **Network** (74k weights, numpy at inference):
 
@@ -182,18 +176,18 @@ learns that what the wall does is not a pulse), and dropped patches.
 BatchNorm is folded into the convolutions at export; a test checks that the
 numpy forward pass matches PyTorch to 1e-4 on a committed fixture.
 
-<p align="center"><img src="docs/model/training_curve.png" alt="Validation accuracy per training epoch: the network rises from 86% to 92% of 15 s windows within 5 BPM and from 71% to 81% of 8 s windows, against flat lines for the hand-made pipeline at 77% and 66%" width="720"></p>
+<p align="center"><img src="docs/model/training_curve.png" alt="Validation accuracy per training epoch for the network trained on three camera angles: front 15 s windows rise from 84% to 91% within 5 BPM (previous model 91%), 8 s windows from 71% to 79% (previous 80%), and the left and right cameras from about 52% to 63-64% (previous model 54-56%)" width="720"></p>
 
 **Confidence you can use.** On the test split, the network's confidence
 matches how often it is right:
 
 | Network confidence | 15 s windows | Within 5 BPM of the sensor |
 | --- | --- | --- |
-| below 30% | 60 | 30% |
-| 30-50% | 399 | 40% |
-| 50-70% | 707 | 54% |
-| 70-90% | 1196 | 79% |
-| 90% and above | 8639 | **98%** |
+| below 30% | 121 | 31% |
+| 30-50% | 518 | 46% |
+| 50-70% | 805 | 58% |
+| 70-90% | 1330 | 85% |
+| 90% and above | 8227 | **98%** |
 
 The tracker shows a number from 40% confidence, keeps it above 30%, and
 marks it steady at 80% ([`docs/model/tracker_validation.md`](docs/model/tracker_validation.md):
@@ -204,7 +198,9 @@ the sweep, on validation people only).
 ```bash
 pip install -r requirements-train.txt
 python build_mcd_dataset.py --out mcd_features --jobs 4                  # ~5 h, ~1.3 GB kept
-python train_net.py --data mcd_features --workers 1                      # -> vitals_net_weights.npz, ~2 h
+python build_mcd_dataset.py --out mcd_left --camera USBVideo --splits mcd_features/splits.json    # side cameras
+python build_mcd_dataset.py --out mcd_right --camera IriunWebcam --splits mcd_features/splits.json
+python train_net.py --data mcd_features --data mcd_left --data mcd_right --workers 1   # ~2.5 h
 python tune_tracker.py --data mcd_features                                # tracker thresholds (validation)
 python compare_net.py --data mcd_features --split test --out docs/validation/net_test
 python dropped_frames.py --data mcd_features                              # flicker vs dropped frames
@@ -338,6 +334,17 @@ intro.
   heartbeat does. Light mode unlocks, lets the camera adapt, and locks again.
 * Frames are timed by when the camera captured them, not when the page got
   round to processing them.
+* A cheap face detector counts the faces in view once a second, and the face
+  tracker is asked for exactly that many (up to three): asked for more than
+  are in view, MediaPipe searches for faces on every frame, which halved the
+  frame rate on a CPU and made the landmarks jitter. With more than one person in view,
+  `FaceLock` (`web/features.js`, mirrored in `frame_features.py` and checked
+  against it by a test) measures one: the biggest, most central face at
+  first, then whichever face is nearest to where that person was. If none is
+  within 0.75 face widths, that person is out of view and nothing is
+  measured until 3 s pass (the same rule as the start-over), so the reading
+  never silently moves to someone else. Tapping a face switches to them and
+  starts over. The wall reference boxes keep off every face.
 
 The web version also coaches framing (face partly out of the picture, too far,
 tilted), since the network was trained on people facing the camera with the
@@ -361,9 +368,9 @@ resample people, since windows of one person are not independent.
 
 | Window | Pipeline | MAE (BPM) [95% CI] | Within 5 BPM [95% CI] | RMSE | Pearson r |
 | --- | --- | --- | --- | --- | --- |
-| 15 s | **network** | **2.32** [1.75-3.00] | **90%** [88-92%] | 8.3 | 0.83 |
+| 15 s | **network** | **2.32** [1.78-3.01] | **90%** [88-92%] | 8.3 | 0.83 |
 | 15 s | hand-made | 7.08 [5.43-8.57] | 77% [73-82%] | 16.6 | 0.48 |
-| 8 s | **network** | **4.37** [3.73-5.09] | **80%** [77-83%] | | |
+| 8 s | **network** | **4.49** [3.84-5.24] | **80%** [77-83%] | | |
 | 8 s | hand-made | 9.86 [8.27-11.36] | 63% [59-68%] | | |
 
 **What the app shows** (every recording replayed second by second through
@@ -371,12 +378,12 @@ the app's own buffer and tracker):
 
 | | Network | Hand-made |
 | --- | --- | --- |
-| steady number on screen | **90%** of the time | 46% |
+| steady number on screen | **89%** of the time | 46% |
 | steady numbers within 5 BPM | 92% | 95% |
-| steady numbers: MAE / RMSE / r | 2.0 / 7.2 BPM / 0.87 | 1.9 / 7.9 BPM / 0.80 |
-| "settling" numbers within 5 BPM | 67% | 78% |
+| steady numbers: MAE / RMSE / r | 1.8 / 6.8 BPM / 0.89 | 1.9 / 7.9 BPM / 0.80 |
+| "settling" numbers within 5 BPM | 70% | 78% |
 | first number (median) | **7.0 s** | 10.3 s |
-| a number within 15 s | **100%** | 63% |
+| a number within 15 s | **98%** | 63% |
 
 The hand-made pipeline is as accurate when it does show a steady number,
 but shows one only half as often and needs 10 s for the first.
@@ -388,36 +395,36 @@ At rest and after exercise it is equally good (15 s windows within 5 BPM:
 | --- | --- | --- | --- |
 | below 80 (dim) | 48 | **92%** | 79% |
 | 80-95 | 76 | **89%** | 79% |
-| 95 and above (bright) | 76 | **90%** | 74% |
+| 95 and above (bright) | 76 | **91%** | 74% |
 
 **Dropped frames** (validation split, [`dropped_frames.md`](docs/validation/dropped_frames.md)):
-with 30% of frames dropped at random, the network stays at 88% of windows
-within 5 BPM (91% with every frame) thanks to the flicker removal; without
-it, 75%.
+with 30% of frames dropped at random, the network stays at 86% of windows
+within 5 BPM (90% with every frame) thanks to the flicker removal; without
+it, 78%.
 
-**Harder conditions** (validation split, [`hard_conditions.md`](docs/validation/hard_conditions.md)).
-The dataset filmed the same people from the left and right too, and the front
-video can be moved down until the chin is out of the picture (a laptop
-camera tilted down):
+**Harder conditions** ([`hard_conditions.md`](docs/validation/hard_conditions.md)).
+The dataset filmed the same people from the left and right too. The network
+trained on all three angles; before, it saw the front only. Held-out test
+(front: all 100 people; sides: 50 of them):
 
-| View | 15 s windows within 5 BPM: network [95% CI] | hand-made | steady number shown | steady within 5 BPM |
+| View | 15 s windows within 5 BPM [95% CI] | before (front-only network) | hand-made | steady numbers within 5 BPM (before) |
 | --- | --- | --- | --- | --- |
-| front | **91%** [86-95%] | 79% | 92% | 92% |
-| chin cut off | **92%** [87-95%] | 79% | 92% | 92% |
-| from the left | **56%** [48-63%] | 37% | 47% | 75% |
-| from the right | **55%** [47-63%] | 33% | 58% | 71% |
+| front | **90%** [88-92%] | 90% | 77% | 92% (92%) |
+| from the left | **68%** [62-74%] | 59% | 45% | 87% (77%) |
+| from the right | **68%** [61-74%] | 63% | 44% | 87% (79%) |
 
-A cut-off chin costs nothing; a turned face costs a lot, because the network
-never saw one in training. Its confidence drops there, so it shows a steady
-number half as often. Bridging face losses of up to 3 s (was 1 s) cut
+A turned face is still harder: the network is less sure, so it shows a steady
+number about half the time instead of ~90%. Moving the face down until the
+chin is out of the picture (a laptop camera tilted down) costs nothing
+(validation: 90% vs 91%). Bridging face losses of up to 3 s (was 1 s) cut
 start-overs on the left camera from 0.14 to 0.03 per minute at no cost.
 
 **Where it still fails.** 5 of 200 test recordings are off by more than
 10 BPM on average over their 15 s windows (hand-made: 52). Four are two
 people (both of their recordings) where a periodic component that is not the
 pulse wins about half the windows; the network's confidence there is
-middling (median 0.6), so the tracker shows a steady number only a third of
-the time. In the fifth, the network and the hand-made pipeline agree with
+middling (median about 0.5), so the tracker shows a steady number only 13-37%
+of the time. In the fifth, the network and the hand-made pipeline agree with
 each other and are within 5 BPM in 71% of windows; the misses are likely the
 sensor reference.
 
@@ -659,12 +666,17 @@ OLED phone, a matte photo under a lamp) still need testing in person.
   dataset: one recording setup and room type, people sitting still, recorded
   in one country, compressed 640x480 webcam video. The test split measures
   how it does on new people in that setup, not on every webcam and room.
-* **Turned faces.** Seen from the side, only about 55% of windows are within
-  5 BPM (front: 91%); the network was trained on the front camera only.
-  Looking down at a phone (pitch) was not measured: the dataset has no such
-  view.
+* **Two people in view.** The app measures one of them and never mixes the
+  two, but the face model then runs twice per frame. On a machine without a
+  usable graphics chip (the headless test machine) that halves the frame rate,
+  and in a browser test with two dataset people side by side the network was
+  mostly unsure and showed "--" for a person it reads at 53 vs 55 BPM alone.
+  With face tracking on a graphics chip the extra cost is a few milliseconds.
+* **Turned faces.** Seen from the side, 68% of windows are within 5 BPM
+  (front: 90%), even after training on side views. Looking down at a phone
+  (pitch) was not measured: the dataset has no such view.
 * **Dropped frames with strong flicker.** Removing the flicker recovers most
-  of the accuracy lost to dropped frames, not all of it (88% vs 91% of
+  of the accuracy lost to dropped frames, not all of it (86% vs 90% of
   windows within 5 BPM). Training with dropped frames would close more of
   the gap.
 * **Lighting and motion.** Dim light raises camera noise; movement corrupts the
@@ -683,8 +695,7 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 
 ## Roadmap
 
-* **More varied training data**: the other MCD-rPPG cameras (side views are
-  the biggest gap, see above), UBFC-rPPG and
+* **More varied training data**: UBFC-rPPG and
   other public sets, dim rooms and a wider, measured range of skin tones;
   training with dropped frames.
 * **Breathing rate and beat-to-beat timing** from the network's waveform head.

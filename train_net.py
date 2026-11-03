@@ -4,6 +4,12 @@ train_net.py -- train vitals_net (see vitals_net.py) on MCD-rPPG features. PyTor
     python build_mcd_dataset.py --out mcd_features            # per-frame features + PPG for ~540 people
     python train_net.py --data mcd_features --workers 1       # -> vitals_net_weights.npz (~2 h on 4 cores)
 
+Several camera views of the same people (build_mcd_dataset.py --camera, same splits):
+    python train_net.py --data mcd_features --data mcd_left --data mcd_right --workers 1
+The first --data is the front view. Training uses the train people of every view;
+the best epoch is chosen on front (15 s + 8 s windows) plus side views (15 s), so
+the front view cannot quietly get worse.
+
 Training uses only the 'train' people, and model selection only the 'validation'
 people (splits.json). The 'test' people are never read here.
 
@@ -35,7 +41,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vitals_net as vn
-from build_mcd_dataset import load_features
+from build_mcd_dataset import load_features, split_folders
 from evaluate_video import read_ground_truth, reference_bpm
 from vitals_dsp import FS, HR_HIGH, HR_LOW, analyze_heart_rate, bandpass, pick_peak, power_spectrum, snr_db
 
@@ -275,7 +281,8 @@ def evaluate(net, windows):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", default="mcd_features")
+    ap.add_argument("--data", action="append", help="features folder; repeat for more camera views "
+                    "(first = front). Default: mcd_features")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--steps", type=int, default=250, help="batches per epoch")
     ap.add_argument("--batch", type=int, default=48)
@@ -287,23 +294,22 @@ def main():
     ap.add_argument("--train-split", default="train", help="split to train on ('validation' only for a smoke test)")
     ap.add_argument("--out", default="vitals_net_weights.npz")
     args = ap.parse_args()
+    args.data = args.data or ["mcd_features"]
+    views = ["front"] + [os.path.basename(os.path.normpath(d)) for d in args.data[1:]]
 
-    with open(os.path.join(args.data, "splits.json")) as f:
-        splits = json.load(f)
-
-    def folders(split):
-        return [os.path.join(args.data, f"{p}_{s}") for p in splits[split] for s in ("before", "after")
-                if os.path.exists(os.path.join(args.data, f"{p}_{s}", "features.npz"))]
-
-    train_f, val_f = folders(args.train_split), folders("validation")
+    train_f = [f for d in args.data for f in split_folders(d, args.train_split)]
+    val_f = {v: split_folders(d, "validation") for v, d in zip(views, args.data)}
     if args.max_train:
         train_f = train_f[:args.max_train]
-    print(f"train recordings {len(train_f)}, validation recordings {len(val_f)}", flush=True)
+    print(f"train recordings {len(train_f)}, validation recordings "
+          + ", ".join(f"{v} {len(f)}" for v, f in val_f.items()), flush=True)
     t0 = time.time()
     recs = [load_recording(f) for f in train_f]
-    val15 = validation_windows(val_f, 15.0)
-    val8 = validation_windows(val_f, 8.0)
-    print(f"data ready in {time.time() - t0:.0f} s: {len(val15)} + {len(val8)} validation windows", flush=True)
+    val15 = validation_windows(val_f["front"], 15.0)
+    val8 = validation_windows(val_f["front"], 8.0)
+    side15 = {v: validation_windows(val_f[v], 15.0) for v in views[1:]}
+    print(f"data ready in {time.time() - t0:.0f} s: {len(val15)} + {len(val8)} front validation windows"
+          + "".join(f", {len(w)} {v}" for v, w in side15.items()), flush=True)
 
     net = Net(hidden=args.hidden)
     print(f"parameters: {sum(p.numel() for p in net.parameters())}", flush=True)
@@ -327,22 +333,27 @@ def main():
             sched.step()
             tl.append((ce.item(), pear.item()))
         m15, m8 = evaluate(net, val15), evaluate(net, val8)
+        ms = {v: evaluate(net, w) for v, w in side15.items()}
         tl = np.mean(tl, axis=0)
         row = {"epoch": epoch + 1, "ce": float(tl[0]), "pearson_loss": float(tl[1]),
                **{f"v15_{k}": v for k, v in m15.items() if not isinstance(v, list)},
-               **{f"v8_{k}": v for k, v in m8.items() if not isinstance(v, list)}}
+               **{f"v8_{k}": v for k, v in m8.items() if not isinstance(v, list)},
+               **{f"{view}_v15_{k}": v for view, m in ms.items() for k, v in m.items() if not isinstance(v, list)}}
         history.append(row)
         print(f"epoch {epoch + 1:2d} ({time.time() - te:.0f} s) loss ce {tl[0]:.3f} wave {tl[1]:.3f} | "
               f"15 s windows: net MAE {m15['net_MAE']:.2f} within5 {m15['net_within5']:.0%} "
               f"(POS {m15['pos_MAE']:.2f} / {m15['pos_within5']:.0%}) | 8 s: net {m8['net_MAE']:.2f} "
               f"{m8['net_within5']:.0%} (POS {m8['pos_MAE']:.2f} / {m8['pos_within5']:.0%}) | "
-              f"conf~correct r {m15['conf_auc_proxy']:.2f}",
+              f"conf~correct r {m15['conf_auc_proxy']:.2f}"
+              + "".join(f" | {v} 15 s: net {m['net_MAE']:.2f} {m['net_within5']:.0%} (POS {m['pos_within5']:.0%})"
+                        for v, m in ms.items()),
               flush=True)
-        score = m15["net_MAE"] + m8["net_MAE"]
+        score = m15["net_MAE"] + m8["net_MAE"] + sum(m["net_MAE"] for m in ms.values())
         if best is None or score < best:
             best = score
             meta = {"epoch": epoch + 1, "args": vars(args), "validation": row,
-                    "train_recordings": len(train_f), "validation_recordings": len(val_f)}
+                    "train_recordings": len(train_f), "views": views,
+                    "validation_recordings": {v: len(f) for v, f in val_f.items()}}
             export(net, args.out, meta)
             torch.save(net.state_dict(), args.out.replace(".npz", ".pt"))
     with open(args.out.replace(".npz", "_history.json"), "w") as f:
