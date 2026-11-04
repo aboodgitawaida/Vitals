@@ -160,3 +160,15 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--grid);
   #bpm { font-size: 56px; }
   .keys { display: none; }
 }
+
+/* Older methods: tucked away, and flagged when one is on (the network is the accurate one). */
+.older { display: inline-flex; align-items: center; gap: 8px; }
+.older summary { cursor: pointer; color: var(--muted, #9a9a9a); font-size: 0.85em; list-style: none; padding: 6px 4px; }
+.older summary::-webkit-details-marker { display: none; }
+.older summary::before { content: "▸ "; }
+.older[open] summary::before { content: "▾ "; }
+.method-note {
+  position: absolute; top: 44px; right: 12px; max-width: 60%;   /* below the "2 people in view" line */
+  background: rgba(120, 60, 0, 0.85); color: #fff; padding: 6px 10px; border-radius: 8px; font-size: 0.85em;
+}
+.method-note button { margin-left: 6px; padding: 2px 8px; font-size: 1em; }
