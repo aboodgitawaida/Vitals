@@ -11,10 +11,10 @@
 
 [**Try it live →**](https://vitals-track.vercel.app)
 
-<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard reading 67-72 BPM from a held-out recording: no reading, then a dimmed settling number, then a steady one with the network's probability curve" width="820"></a>
+<a href="https://vitals-track.vercel.app"><img src="docs/demo.gif" alt="The Vitals dashboard on a held-out recording: no reading, then a dimmed settling 72 BPM after 8 s, then a steady 67-68 BPM at 93-98% sure, with the network's probability curve; the finger sensor read 64-68" width="820"></a>
 
 <sub>The web app reading a recording of a person the network never trained on (MCD-rPPG test split,
-typical accuracy for that split) through a virtual camera: 67-72 BPM; the finger pulse sensor read 64-68.
+typical accuracy for that split) through a virtual camera: a dimmed 72 BPM after 8 s, then a steady 67-68; the finger pulse sensor read 64-68.
 A new number is dimmed ("settling") until it is steady; the chart is the network's probability for every heart rate.
 Dashed line: the skin it measures. Face blurred for privacy.</sub>
 
