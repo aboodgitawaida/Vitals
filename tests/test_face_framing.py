@@ -39,3 +39,13 @@ def test_far_away_and_tilted():
 
 def test_no_framing_data_means_no_advice():
     assert assess_framing(None) is None
+
+
+def test_shadow_warning_only_for_a_deep_shadow():
+    from face_layout import assess_lighting
+    stats = lambda left, right: {"luminance": {"forehead": 130.0, "left cheek": left, "right cheek": right},
+                                 "clipped_fraction": 0.0}
+    assert assess_lighting(stats(125.0, 157.0), 30)[0] == "good"        # 1.26x (a real session): fine
+    assert assess_lighting(stats(100.0, 190.0), 30)[0] == "good"        # 1.9x: still read fine on validation
+    level, msg = assess_lighting(stats(60.0, 180.0), 30)                # 3x: deep shadow
+    assert level == "fair" and "shadow" in msg
