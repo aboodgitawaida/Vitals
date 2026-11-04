@@ -776,6 +776,7 @@ function drawTrend(trend) {
 function setMethod(method) {
   state.method = method;
   document.querySelectorAll("[data-method]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.method === method)));
+  $("method-note").hidden = method === "auto";       // an older method is on: say so, offer the way back
   control("method", method);
 }
 
@@ -816,6 +817,7 @@ $("light-toggle").addEventListener("click", () => setLight(!state.light));
 $("map-toggle").addEventListener("click", () => setMap(!state.showMap));
 $("save").addEventListener("click", saveSession);
 $("view").addEventListener("click", chooseFace);
+$("back-to-net").addEventListener("click", () => setMethod("auto"));
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && state.light) setLight(false, false); });
 document.addEventListener("keydown", (e) => {
   if (!state.running || e.metaKey || e.ctrlKey || e.altKey) return;

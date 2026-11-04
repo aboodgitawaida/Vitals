@@ -371,6 +371,9 @@ def main():
             # "Good" needs a clean spectrum AND all three methods agreeing.
             agree = analysis["agreement"] if analysis else 0
             level = "good" if snr is not None and snr >= SNR_GOOD_DB and agree == 3 else "fair"
+        if METHODS[method_idx] != "auto":            # an older method is on: say so (M switches back)
+            status = f"Older method ({METHODS[method_idx]}): less accurate - M cycles back to the network" + (
+                f" - {status}" if status else "")
         info = {
             "bpm": bpm, "snr_db": snr, "fps": fps, "status": status, "now": now,
             "level": level, "state": reading.state,
