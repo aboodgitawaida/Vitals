@@ -701,6 +701,10 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 * **Breathing rate and beat-to-beat timing** from the network's waveform head.
 * Liveness check and recording in the web version.
 
+## How it was built
+
+I built Vitals with AI coding tools: much of the code was written with Claude Code. I decided what to build and how to measure it, and reviewed and tested the changes against the published results above.
+
 ## Author
 
 **Abood Awaida** · [GitHub](https://github.com/aboodgitawaida) · [LinkedIn](https://www.linkedin.com/in/abood-awaida/)
@@ -710,6 +714,7 @@ OLED phone, a matte photo under a lamp) still need testing in person.
 - **[Courseflix](https://github.com/aboodgitawaida/Courseflix)**: Netflix-style course discovery for UTM students, with reviews, recommendations and 2,600+ courses. [courseflix.ca](https://www.courseflix.ca)
 - **[LotPulse](https://github.com/aboodgitawaida/LotPulse)**: live, student-reported parking enforcement alerts for UTM campus lots. [lotpulse-utm.vercel.app](https://lotpulse-utm.vercel.app)
 - **[Basil](https://github.com/aboodgitawaida/Basil)**: a cosy pixel-art kitchen game that suggests recipes from what's in your fridge. [basil-cat.vercel.app](https://basil-cat.vercel.app)
+- **[Emblem](https://github.com/aboodgitawaida/Emblem)**: a macOS menu bar Now Playing item that morphs into the artist's logo (Swift, SwiftUI).
 
 ## License
 
