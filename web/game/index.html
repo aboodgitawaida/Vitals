@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STILL</title>
+<meta name="description" content="A first-person horror game that listens to your heart, measured from your webcam with Vitals.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="game.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="locker"></div>
+<div id="flash"></div>
+
+<div id="hud" hidden>
+  <div id="objective"></div>
+  <div id="crosshair"></div>
+  <div id="prompt"></div>
+  <div id="subtitle"></div>
+  <div id="hint"></div>
+  <div id="hearing"><span>IT IS LISTENING</span></div>
+  <div id="stamina"><div id="stamina-fill"></div></div>
+  <div id="vitals">
+    <canvas id="ecg" width="220" height="48"></canvas>
+    <div class="read"><span id="bpm">--</span><small>BPM</small></div>
+    <div id="src">SIMULATED</div>
+  </div>
+  <div id="glitch">SIGNAL LOST</div>
+</div>
+<pre id="debug" hidden></pre>
+
+<section id="loading" class="screen">
+  <div class="center">
+    <h1 class="logo">STILL</h1>
+    <div class="bar"><div id="load-bar"></div></div>
+    <p id="load-text">Loading…</p>
+  </div>
+</section>
+
+<section id="title" class="screen" hidden>
+  <div class="title-wrap">
+    <h1 class="logo">STILL</h1>
+    <p class="tagline">It can hear your heart.</p>
+    <nav class="menu">
+      <button id="btn-new">New Game</button>
+      <button id="btn-settings">Settings</button>
+      <button id="btn-controls">Controls</button>
+      <button id="btn-about">How it works</button>
+    </nav>
+  </div>
+  <footer class="foot">Demo build · Heart rate by <b>Vitals</b> · Headphones recommended</footer>
+</section>
+
+<section id="consent" class="screen panel-screen" hidden>
+  <div class="panel">
+    <h2>Before you play</h2>
+    <p><b>STILL</b> watches you while you play. With your permission it uses your webcam to measure your heart rate and read your face, and your microphone to hear you. The game changes depending on how scared you are. The monster can hear your heartbeat.</p>
+    <ul class="warn">
+      <li>It contains intense jump scares, flashing light, sudden loud sounds and darkness.</li>
+      <li>Do not play if you have a heart condition, epilepsy or photosensitivity, or are pregnant.</li>
+      <li>If your measured heart rate stays very high, the game pauses for a break (you can change this in Settings).</li>
+      <li>Everything is processed on this device. No video, sound or heart data leaves your computer.</li>
+      <li>This is a game. The heart rate is not medical and not for health use.</li>
+    </ul>
+    <label class="check"><input type="checkbox" id="agree"> I understand. I'm 16 or older and want to play.</label>
+    <div class="modes">
+      <button class="mode primary" data-mode="cam+mic">Camera + microphone<small>Your real heart rate. Your voice can give you away.</small></button>
+      <button class="mode" data-mode="cam">Camera only<small>Your real heart rate.</small></button>
+      <button class="mode" data-mode="sim">No camera<small>A simulated heart that reacts to the game.</small></button>
+    </div>
+    <button class="link" data-back="title">Back</button>
+  </div>
+</section>
+
+<section id="calibrate" class="screen" hidden>
+  <div class="center">
+    <div id="cal-ring"><div><span id="cal-bpm">--</span><small>BPM</small></div></div>
+    <h2 id="cal-title">Sit still.</h2>
+    <p id="cal-sub"></p>
+    <p id="cal-conf" class="dim"></p>
+    <p id="cal-status" class="dim"></p>
+  </div>
+</section>
+
+<section id="pause" class="screen panel-screen" hidden>
+  <div class="panel small">
+    <h2>Paused</h2>
+    <nav class="menu left">
+      <button id="btn-resume">Resume</button>
+      <button id="btn-pause-settings">Settings</button>
+      <button id="btn-checkpoint">Restart from checkpoint</button>
+      <button id="btn-quit">Quit to title</button>
+    </nav>
+  </div>
+</section>
+
+<section id="settings" class="screen panel-screen" hidden>
+  <div class="panel">
+    <h2>Settings</h2>
+    <div class="grid">
+      <label>Volume <output id="set-volume-v"></output></label><input type="range" id="set-volume" min="0" max="1" step="0.05">
+      <label>Mouse sensitivity <output id="set-sens-v"></output></label><input type="range" id="set-sens" min="0.3" max="2.5" step="0.1">
+      <label>Brightness <output id="set-bright-v"></output></label><input type="range" id="set-bright" min="0.6" max="1.8" step="0.05">
+      <label>Show heart monitor</label><input type="checkbox" id="set-heart">
+      <label>Hear your own heartbeat</label><input type="checkbox" id="set-heartaudio">
+      <label>Safety break</label><input type="checkbox" id="set-safety">
+      <label>Break above (BPM) <output id="set-safetybpm-v"></output></label><input type="range" id="set-safetybpm" min="110" max="190" step="5">
+    </div>
+    <button class="link" data-back="auto">Back</button>
+  </div>
+</section>
+
+<section id="controls" class="screen panel-screen" hidden>
+  <div class="panel">
+    <h2>Controls</h2>
+    <dl class="keys">
+      <dt>W A S D</dt><dd>Move</dd>
+      <dt>Mouse</dt><dd>Look</dd>
+      <dt>Shift</dt><dd>Run. Loud.</dd>
+      <dt>Ctrl / C</dt><dd>Crouch. Quiet.</dd>
+      <dt>E</dt><dd>Open, take, read, hide</dd>
+      <dt>F</dt><dd>Flashlight. It can see the light.</dd>
+      <dt>Space (hold)</dt><dd>Breathe slowly. With a camera, actually do it.</dd>
+      <dt>Esc</dt><dd>Pause</dd>
+      <dt>` or F3</dt><dd>What the game knows about you</dd>
+    </dl>
+    <button class="link" data-back="title">Back</button>
+  </div>
+</section>
+
+<section id="about" class="screen panel-screen" hidden>
+  <div class="panel">
+    <h2>How it works</h2>
+    <p>Your webcam measures your heart rate from tiny colour changes in your skin (<b>Vitals</b>: a neural network trained on 400 people, running in your browser). Face tracking reads fast reactions: eyes widening, a flinch, looking away. The microphone hears gasps and screams.</p>
+    <p>A <b>Director</b> turns that into a fear score and treats every scare as an experiment: what made your heart rate climb, what made you flinch, and what you've stopped reacting to. It builds dread, waits for you to relax, then strikes with what works on you. When you're past your limit, it backs off.</p>
+    <p>And the thing in the building hears your heart. A calm heart is silent. A racing one carries through walls. Hiding works only if you can calm down.</p>
+    <p class="dim">At the end you get your fear profile: what scared you most.</p>
+    <button class="link" data-back="title">Back</button>
+  </div>
+</section>
+
+<section id="note" class="screen" hidden>
+  <article class="paper">
+    <h3 id="note-title"></h3>
+    <p id="note-body"></p>
+    <small>[E] or click to put it down</small>
+  </article>
+</section>
+
+<section id="dead" class="screen" hidden>
+  <div class="center">
+    <h1 id="dead-title" class="death">IT HEARD YOU</h1>
+    <p id="dead-stats" class="dim"></p>
+    <nav class="menu"><button id="btn-retry">Try again</button><button id="btn-dead-quit">Quit to title</button></nav>
+  </div>
+</section>
+
+<section id="break" class="screen panel-screen" hidden>
+  <div class="panel small">
+    <h2>Take a breath.</h2>
+    <p>Your heart rate has been above the safety limit for a while (<b id="break-bpm"></b> BPM). The game is paused.</p>
+    <p class="dim">Breathe in for four, hold, out for six. Continue when you're ready.</p>
+    <nav class="menu left"><button id="btn-break-resume">Continue</button><button id="btn-break-quit">Quit</button></nav>
+  </div>
+</section>
+
+<section id="end" class="screen panel-screen" hidden>
+  <div class="panel wide">
+    <p class="kicker">You got out.</p>
+    <h2>Your fear profile</h2>
+    <p id="end-source" class="dim"></p>
+    <div id="end-stats" class="stats"></div>
+    <p id="end-peak"></p>
+    <h3>What scared you most</h3>
+    <ol id="end-top" class="rank"></ol>
+    <p id="end-least" class="dim"></p>
+    <nav class="menu left"><button id="btn-end-again">Play again</button></nav>
+  </div>
+</section>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>
