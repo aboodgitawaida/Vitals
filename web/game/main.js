@@ -317,7 +317,7 @@ class Game {
     this.director.setPhase("relief");
     this.audio.setAmbient(0.35);
     const hiss = this.audio.voice("tv"); this.audio.place(hiss.pan, this.level.tapeMesh.position); hiss.gain.gain.value = 0.05;
-    for (const [t] of TAPE) setTimeout(() => this.audio.whisper(this.level.tapeMesh.position, 2.6, 0.35), t * 1000 + 200);
+    this.speakTape();
     this.hud.subtitles(TAPE.map(([t, s]) => [t, `MIRA: ${s}`]));
     setTimeout(() => {
       hiss.gain.gain.value = 0; hiss.stop(); led.material.emissiveIntensity = 0;
@@ -338,6 +338,62 @@ class Game {
         }, 4200);
       }, 2400);
     }, 24500);
+  }
+
+  // Mira's voice: the browser's own speech, slow and low, under tape hiss. The last line is cut off.
+  speakTape(onDone) {
+    const synth = window.speechSynthesis;
+    const voices = synth?.getVoices() ?? [];
+    const voice = voices.find((v) => /en/i.test(v.lang) && /female|samantha|zira|susan|serena|karen|moira|tessa|fiona|victoria|aria|jenny|libby|sonia|google uk english female/i.test(v.name))
+      ?? voices.find((v) => /en/i.test(v.lang));
+    synth?.cancel();
+    TAPE.forEach(([t, line], i) => setTimeout(() => {
+      if (synth) {
+        const u = new SpeechSynthesisUtterance(line);
+        if (voice) u.voice = voice;
+        u.rate = 0.82; u.pitch = 0.92; u.volume = 0.9;
+        synth.speak(u);
+        if (i === TAPE.length - 1) setTimeout(() => { synth.cancel(); this.audio.sting(0.6); onDone?.(); }, 2900);
+      } else this.audio.whisper(null, 2.6, 0.35);
+    }, t * 1000 + 150));
+  }
+
+  // Extras on the title screen: the tape on its own, and a look at the Tenant.
+  playTapeExtra() {
+    this.audio.init(); this.audio.setVolume(this.settings.volume);
+    const hiss = this.audio.voice("tv"); this.audio.place(hiss.pan, this.camera.position); hiss.gain.gain.value = 0.08;
+    this.hide("title"); $("hud").hidden = false; $("hud").classList.add("cinematic"); $("extra-back").hidden = false;
+    this.extra = { kind: "tape", stop: () => { hiss.gain.gain.value = 0; hiss.stop(); window.speechSynthesis?.cancel(); this.hud.subtitles([]); $("subtitle").classList.remove("on"); } };
+    this.speakTape(() => setTimeout(() => this.closeExtra(), 1500));
+    this.hud.subtitles(TAPE.map(([t, s]) => [t, `MIRA: ${s}`]));
+  }
+
+  viewTenant() {
+    this.audio.init(); this.audio.setVolume(this.settings.volume);
+    this.hide("title"); $("extra-back").hidden = false;
+    const at = new THREE.Vector3(26, 0, 12);
+    this.monster.spawn(at, "scripted"); this.monster.mouthOpen = 0;
+    this.extra = { kind: "tenant", at, t: 0, stop: () => this.monster.despawn() };
+  }
+
+  closeExtra() {
+    if (!this.extra) return;
+    this.extra.stop(); this.extra = null;
+    $("hud").hidden = true; $("hud").classList.remove("cinematic"); $("extra-back").hidden = true;
+    this.show("title");
+  }
+
+  hide(id) { $(id).hidden = true; }
+
+  updateTenantView(dt) {
+    const e = this.extra; e.t += dt;
+    const m = this.monster, a = e.t * 0.25 + Math.PI / 2, r = 2.6 + Math.sin(e.t * 0.3) * 0.6;
+    this.camera.position.set(e.at.x + Math.sin(a) * r, 1.45 + Math.sin(e.t * 0.2) * 0.25, e.at.z + Math.cos(a) * r * 0.55);
+    this.camera.lookAt(e.at.x, 1.75, e.at.z);
+    m.face(this.camera.position);
+    m.mouthOpen = Math.max(0, Math.sin(e.t * 0.7) - 0.6) * 2.5;
+    m.animate(dt, this.T, 4);
+    this.updateFlashlight(dt, 1);
   }
 
   end() {
@@ -578,6 +634,11 @@ class Game {
     on("btn-settings", () => { this.settingsBack = "title"; this.show("settings"); });
     on("btn-controls", () => { this.controlsBack = "title"; this.show("controls"); });
     on("btn-about", () => this.show("about"));
+    on("btn-tape", () => this.playTapeExtra());
+    on("btn-tenant", () => this.viewTenant());
+    on("extra-back", () => this.closeExtra());
+    addEventListener("keydown", (e) => { if (e.code === "Escape" && this.extra) this.closeExtra(); });
+    window.speechSynthesis?.getVoices();          // voices load lazily in some browsers
     for (const b of document.querySelectorAll("[data-back]")) b.addEventListener("click", () => this.show(b.dataset.back === "auto" ? (this.state === "paused" ? "pause" : "title") : b.dataset.back));
     const agree = $("agree");
     const sync = () => { for (const b of document.querySelectorAll(".mode")) b.disabled = !agree.checked; };
@@ -617,6 +678,7 @@ class Game {
     this.T += dt;
     if (this.state === "play") this.updatePlay(dt);
     else if (this.state === "dying") { this.updateDying(dt); this.monster.animate(dt, this.T, 0.5); }
+    else if (this.extra?.kind === "tenant") this.updateTenantView(dt);
     else if (this.state === "title" || this.state === "loading") this.updateTitle(dt);
     this.level.update(dt, this.T);
     this.updateLights(dt);

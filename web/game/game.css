@@ -138,3 +138,10 @@ button { font: inherit; color: inherit; }
   background: repeating-linear-gradient(180deg, #000 0 5.5vh, transparent 5.5vh 7.2vh); -webkit-mask: radial-gradient(ellipse 34% 30% at 50% 46%, transparent 55%, #000 100%); }
 #locker.on { opacity: 1; background: linear-gradient(#000 0 30vh, transparent 30vh 70vh, #000 70vh), repeating-linear-gradient(180deg, #000 0 2.4vh, transparent 2.4vh 4.6vh); -webkit-mask: none; }
 #debug { position: fixed; right: 12px; top: 12px; z-index: 20; margin: 0; padding: 12px 14px; font: 11px/1.45 var(--mono); color: #b9e0c4; background: rgba(0, 0, 0, 0.75); border: 1px solid #1f3326; pointer-events: none; white-space: pre; }
+
+.menu button.extra { font-size: 19px; color: var(--faint); }
+.menu button.extra:hover { color: var(--ink); }
+#hud.cinematic > *:not(#subtitle) { display: none; }
+#extra-back { position: fixed; z-index: 30; left: 50%; bottom: 28px; transform: translateX(-50%); background: none; border: 1px solid #2c2d25; color: var(--dim);
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; padding: 8px 16px; cursor: pointer; }
+#extra-back:hover { color: var(--ink); border-color: var(--accent); }

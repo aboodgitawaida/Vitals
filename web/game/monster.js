@@ -27,7 +27,7 @@ export class Monster {
   }
 
   build(M) {
-    const skin = M.skin.clone(); skin.roughness = 0.55; skin.color.setRGB(0.75, 0.72, 0.7);
+    const skin = M.skin.clone(); skin.roughness = 0.75; skin.color.setRGB(0.42, 0.39, 0.38);
     const rag = new THREE.MeshStandardMaterial({ color: 0x15130f, roughness: 0.95, side: THREE.DoubleSide });
     const limb = (r, len) => { const g = new THREE.CapsuleGeometry(r, len, 4, 10); g.translate(0, -len / 2 - r, 0); return new THREE.Mesh(g, skin); };
     const j = (parent, x, y, z) => { const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); return g; };
@@ -65,15 +65,33 @@ export class Monster {
     }
     // Long, wet black hair, hanging over where the face should be.
     const hairMat = new THREE.MeshStandardMaterial({ color: 0x050404, roughness: 0.35, metalness: 0.1 });
-    for (let i = 0; i < 70; i++) {
-      const a = (rand() - 0.5) * Math.PI * 1.7, len = 0.45 + rand() * 0.55;
-      const strand = new THREE.Mesh(new THREE.BoxGeometry(0.014 + rand() * 0.02, len, 0.005), hairMat);
-      strand.geometry.translate(0, -len / 2, 0);
-      const r = 0.125;
-      strand.position.set(Math.sin(a) * r * 0.85, 0.16, Math.cos(a) * r * 0.95);
-      strand.rotation.set(Math.cos(a) * 0.12 + (rand() - 0.5) * 0.08, a, -Math.sin(a) * 0.1 + (rand() - 0.5) * 0.08);
-      strand.castShadow = true;
-      this.head.add(strand);
+    const scalp = new THREE.Mesh(new THREE.SphereGeometry(0.155, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.6), hairMat);
+    scalp.scale.set(0.9, 1.34, 1.0); this.head.add(scalp);
+    // A curtain of hair from the crown to the chest, all the way round: strands painted into an
+    // alpha mask, ragged at the ends, hanging where the face should be.
+    const c = document.createElement("canvas"); c.width = 512; c.height = 512;
+    const g = c.getContext("2d");
+    g.fillStyle = "#000"; g.fillRect(0, 0, 512, 512);
+    for (let k = 0; k < 900; k++) {
+      const x = rand() * 512, len = 512 * (0.45 + rand() * 0.55), w = 1 + rand() * 2.5;
+      g.strokeStyle = `rgb(${200 + rand() * 55},${200 + rand() * 55},${200 + rand() * 55})`; g.lineWidth = w;
+      g.beginPath(); g.moveTo(x, 0);
+      g.bezierCurveTo(x + (rand() - 0.5) * 20, len * 0.4, x + (rand() - 0.5) * 30, len * 0.7, x + (rand() - 0.5) * 40, len); g.stroke();
+    }
+    g.fillStyle = "#fff"; g.fillRect(0, 0, 512, 60);
+    const alpha = new THREE.CanvasTexture(c);
+    const hairCurtain = new THREE.MeshStandardMaterial({ color: 0x060505, roughness: 0.35, metalness: 0.1, alphaMap: alpha, alphaTest: 0.45, side: THREE.DoubleSide });
+    for (const [rt, rb, h, y] of [[0.135, 0.2, 0.95, -0.3], [0.125, 0.17, 0.8, -0.24]]) {
+      const geo = new THREE.CylinderGeometry(rt, rb, h, 48, 8, true);
+      const pos = geo.attributes.position;
+      for (let v = 0; v < pos.count; v++) {           // a little sway and clumping
+        const yy = pos.getY(v), t = (h / 2 - yy) / h;
+        pos.setX(v, pos.getX(v) * (1 + (rand() - 0.5) * 0.25 * t));
+        pos.setZ(v, pos.getZ(v) * (1 + (rand() - 0.5) * 0.25 * t) + t * 0.04);
+      }
+      geo.computeVertexNormals();
+      const m = new THREE.Mesh(geo, hairCurtain); m.position.y = y; m.scale.set(1, 1, 1.1); m.castShadow = true;
+      this.head.add(m);
     }
     const cloth = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.32, 0.55, 14, 1, true), rag);
     cloth.position.y = 0.0; this.hips.add(cloth);
@@ -247,14 +265,14 @@ export class Monster {
     this.twitch -= dt;
     if (this.twitch <= 0) {
       this.twitch = 0.3 + rand() * (chase ? 0.6 : 2.4);
-      this.headTarget.set((rand() - 0.5) * 0.6, (rand() - 0.5) * 1.2, (rand() - 0.5) * (rand() < 0.2 ? 2.2 : 0.6));
+      this.headTarget.set((rand() - 0.5) * 0.6, (rand() - 0.5) * 1.2, (rand() - 0.5) * (rand() < 0.2 ? 1.3 : 0.5));
     }
     const k = Math.min(1, dt * 22);
     this.head.rotation.x += (this.headTarget.x - this.head.rotation.x) * k;
     this.head.rotation.y += (this.headTarget.y - this.head.rotation.y) * k;
     this.head.rotation.z += (this.headTarget.z - this.head.rotation.z) * k;
     const open = this.mouthOpen ?? Math.max(0, 1 - dist / 2.5);
-    this.mouth.scale.set(0.9 + open * 0.3, 0.08 + open * 1.6, 0.3);
+    this.mouth.scale.set(0.55 + open * 0.15, 0.06 + open * 1.9, 0.3);
   }
 
   // Look straight at a point (scripted moments).
